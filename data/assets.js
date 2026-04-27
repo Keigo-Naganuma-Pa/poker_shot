@@ -4,7 +4,7 @@
 
 // タイトル画像
 const TITLE_LOGO_PATH = './image/title/title_logo.png';  // ロゴ
-const TITLE_BG_PATH   = './image/title/title_bg.PNG';    // キャラ集合イラスト
+const TITLE_BG_PATH   = './image/title/title_bg.png';    // キャラ集合イラスト
 
 // 背景画像（ゲーム開始時にランダム選択）
 const BG_IMAGE_PATHS = [
