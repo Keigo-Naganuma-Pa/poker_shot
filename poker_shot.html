@@ -1,0 +1,3168 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ポーカー × ショット！</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    #canvas { position: absolute; image-rendering: pixelated; image-rendering: crisp-edges; }
+    #nickname-input {
+      position: absolute; display: none; text-align: center;
+      background: rgba(0,0,0,0.65); border: 2px solid #9966cc; border-radius: 8px;
+      color: #ffffff; outline: none; letter-spacing: 1px;
+    }
+    #nickname-input::placeholder { color: rgba(255,255,255,0.35); }
+  </style>
+</head>
+<body>
+<canvas id="canvas" width="1280" height="720"></canvas>
+<input type="text" id="nickname-input" maxlength="10" placeholder="ニックネーム（MAX10文字）" autocomplete="off" spellcheck="false">
+<script src="data/balance.js"></script>
+<script src="data/assets.js"></script>
+<script>
+'use strict';
+// ================================================================
+// テキーラインディアン  BUILD 0004
+// ================================================================
+
+const BASE_W      = 1280;
+const BASE_H      = 720;
+const BUILD_LABEL = 'BUILD 0029';
+
+// ================================================================
+// CANVAS / LETTERBOX
+// ================================================================
+const canvas = document.getElementById('canvas');
+const ctx    = canvas.getContext('2d');
+let _scale   = 1;
+
+function resize() {
+  _scale = Math.min(window.innerWidth / BASE_W, window.innerHeight / BASE_H);
+  const dw = Math.floor(BASE_W * _scale);
+  const dh = Math.floor(BASE_H * _scale);
+  canvas.style.width  = dw + 'px';
+  canvas.style.height = dh + 'px';
+  canvas.style.left   = Math.floor((window.innerWidth  - dw) / 2) + 'px';
+  canvas.style.top    = Math.floor((window.innerHeight - dh) / 2) + 'px';
+  _repositionNicknameInput();
+}
+window.addEventListener('resize', resize);
+
+// ニックネーム入力欄をcanvas座標 (cx,cy,cw,ch) に合わせて配置
+const _nicknameInput = document.getElementById('nickname-input');
+const NICKNAME_CX = BASE_W / 2 - 150, NICKNAME_CY = 575, NICKNAME_CW = 300, NICKNAME_CH = 44;
+function _repositionNicknameInput() {
+  const r = canvas.getBoundingClientRect();
+  _nicknameInput.style.left      = (r.left + NICKNAME_CX * _scale) + 'px';
+  _nicknameInput.style.top       = (r.top  + NICKNAME_CY * _scale) + 'px';
+  _nicknameInput.style.width     = (NICKNAME_CW * _scale) + 'px';
+  _nicknameInput.style.height    = (NICKNAME_CH * _scale) + 'px';
+  _nicknameInput.style.fontSize  = Math.round(18 * _scale) + 'px';
+  _nicknameInput.style.padding   = Math.round(4 * _scale) + 'px ' + Math.round(10 * _scale) + 'px';
+}
+
+let _playerNickname = '';
+
+resize();
+
+// ================================================================
+// NPC 画像プリロード（BUILD 0006）
+// ================================================================
+const npcImages = {};  // { 'alicia': [Image, Image, Image], ... }
+const npcBonusImages = {};  // BUILD 0019: { 'alicia': Image, ... } (_99.png)
+let titleLogoImage = null;
+let titleBgImage   = null;   // BUILD 0014: タイトル集合イラスト
+
+// BUILD 0013: 背景画像
+const bgImages     = [];   // ロード済み背景 Image 配列
+let currentBgImage = null; // 今回ゲームで使う背景
+
+// BUILD 0013: 背景カバー描画ヘルパー（返値: 描画成功=true / フォールバック必要=false）
+function _drawBgCover(alpha) {
+  if (!currentBgImage || !currentBgImage.complete || !currentBgImage.naturalWidth) return false;
+  const scale = Math.max(BASE_W / currentBgImage.naturalWidth, BASE_H / currentBgImage.naturalHeight);
+  const w = currentBgImage.naturalWidth  * scale;
+  const h = currentBgImage.naturalHeight * scale;
+  ctx.drawImage(currentBgImage, (BASE_W - w) / 2, (BASE_H - h) / 2, w, h);
+  ctx.fillStyle = 'rgba(0,0,0,' + alpha + ')';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+  return true;
+}
+
+function preloadNpcImages(onComplete) {
+  const ids   = Object.keys(NPC_IMAGE_PATHS);
+  // +1 はタイトルロゴ分、+1 はタイトル集合イラスト分、+BG_IMAGE_PATHS.length は背景画像分
+  let   total = ids.length * NPC_IMAGE_STATES + 2 + BG_IMAGE_PATHS.length;
+  let loaded  = 0;
+  function _done() { if (++loaded >= total) onComplete(); }
+
+  // NPC キャラ画像
+  ids.forEach(id => {
+    npcImages[id] = [];
+    NPC_IMAGE_PATHS[id].forEach((src, state) => {
+      const img   = new Image();
+      img.onload  = _done;
+      img.onerror = _done;
+      img.src     = src;
+      npcImages[id][state] = img;
+    });
+  });
+
+  // タイトルロゴ画像（失敗してもゲームは続行）
+  const logoImg    = new Image();
+  logoImg.onload   = () => { titleLogoImage = logoImg; _done(); };
+  logoImg.onerror  = _done;
+  logoImg.src      = TITLE_LOGO_PATH;
+
+  // BUILD 0014: タイトル集合イラスト（失敗してもゲームは続行）
+  const titleBgImg   = new Image();
+  titleBgImg.onload  = () => { titleBgImage = titleBgImg; _done(); };
+  titleBgImg.onerror = _done;
+  titleBgImg.src     = TITLE_BG_PATH;
+
+  // BUILD 0013: 背景画像（失敗した画像はスキップ・null にしない）
+  BG_IMAGE_PATHS.forEach(src => {
+    const img   = new Image();
+    img.onload  = () => { bgImages.push(img); _done(); };
+    img.onerror = _done;  // 失敗はスキップ（bgImages には追加しない）
+    img.src     = src;
+  });
+
+  // BUILD 0019: NPCボーナス画像（失敗してもゲームは続行）
+  const bonusIds = Object.keys(NPC_BONUS_IMAGE_PATHS);
+  total += bonusIds.length;
+  bonusIds.forEach(id => {
+    const img   = new Image();
+    img.onload  = () => { npcBonusImages[id] = img; _done(); };
+    img.onerror = _done;
+    img.src     = NPC_BONUS_IMAGE_PATHS[id];
+  });
+
+  // 画像が 0 枚の場合でも完了コールバックを呼ぶ
+  if (total === 0) onComplete();
+}
+
+function getNpcImageState(hp, maxHp) {
+  const ratio = hp / maxHp;
+  if (ratio > 0.66) return 0;
+  if (ratio > 0.33) return 1;
+  return 2;
+}
+
+// ================================================================
+// INPUT  （エッジ検出付き）
+// ================================================================
+const Input = (() => {
+  const _cur   = {};
+  const _prev  = {};
+  const _mouse = { x: 0, y: 0, clicked: false, _pending: false };
+
+  window.addEventListener('keydown', e => {
+    _cur[e.code] = true;
+    if ((e.code >= 'F2' && e.code <= 'F8') || e.code === 'F9') e.preventDefault();
+  });
+  window.addEventListener('keyup', e => { _cur[e.code] = false; });
+
+  canvas.addEventListener('click', e => {
+    const r  = canvas.getBoundingClientRect();
+    _mouse.x = (e.clientX - r.left) / _scale;
+    _mouse.y = (e.clientY - r.top)  / _scale;
+    _mouse._pending = true;
+  });
+  window.addEventListener('mousemove', e => {
+    const r  = canvas.getBoundingClientRect();
+    _mouse.x = (e.clientX - r.left) / _scale;
+    _mouse.y = (e.clientY - r.top)  / _scale;
+  });
+
+  return {
+    isDown   : c => !!_cur[c],
+    isPressed: c => !!_cur[c] && !_prev[c],
+    get mouse() { return _mouse; },
+    endFrame() {
+      for (const k in _cur) _prev[k] = _cur[k];
+      _mouse.clicked  = _mouse._pending;
+      _mouse._pending = false;
+    },
+  };
+})();
+
+// ================================================================
+// DECK SYSTEM  （Fisher-Yates シャッフル）
+// ================================================================
+const Deck = (() => {
+  const _cards = [];
+  let _idx     = 0;
+
+  function _shuffle() {
+    for (let i = _cards.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = _cards[i]; _cards[i] = _cards[j]; _cards[j] = t;
+    }
+    _idx = 0;
+  }
+
+  return {
+    init() {
+      _cards.length = 0;
+      const suits = ['s', 'h', 'd', 'c'];
+      for (let s = 0; s < suits.length; s++) {
+        for (let v = 2; v <= ACE_VALUE; v++) {
+          _cards.push({ value: v, suit: suits[s] });
+        }
+      }
+      _shuffle();
+    },
+    draw() {
+      if (_idx >= _cards.length) _shuffle();
+      const c = _cards[_idx++];
+      return { value: c.value, suit: c.suit };
+    },
+  };
+})();
+
+// ================================================================
+// BUTTON POOL
+// ================================================================
+const BTN_POOL = 16;
+const _btns    = [];
+for (let i = 0; i < BTN_POOL; i++) {
+  _btns.push({ id: '', x: 0, y: 0, w: 0, h: 0, label: '', cb: null, active: false });
+}
+
+function clearButtons() {
+  for (let i = 0; i < BTN_POOL; i++) _btns[i].active = false;
+}
+
+function registerButton(id, x, y, w, h, label, cb) {
+  for (let i = 0; i < BTN_POOL; i++) {
+    if (_btns[i].id === id || !_btns[i].active) {
+      _btns[i].id = id; _btns[i].x = x; _btns[i].y = y;
+      _btns[i].w  = w;  _btns[i].h = h;
+      _btns[i].label = label; _btns[i].cb = cb; _btns[i].active = true;
+      return;
+    }
+  }
+}
+
+function drawButton(id) {
+  for (let i = 0; i < BTN_POOL; i++) {
+    const b = _btns[i];
+    if (!b.active || b.id !== id) continue;
+    const hov = Input.mouse.x >= b.x && Input.mouse.x <= b.x + b.w &&
+                Input.mouse.y >= b.y && Input.mouse.y <= b.y + b.h;
+    ctx.fillStyle   = hov ? '#dddddd' : '#333344';
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 2;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = hov ? '#000000' : '#ffffff';
+    ctx.font = 'bold 20px monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h / 2);
+    return;
+  }
+}
+
+function processClicks() {
+  if (!Input.mouse.clicked) return;
+  if (isHowToPlayOpen) return;   // BUILD 0018: モーダル中はゲーム操作を無効化
+  for (let i = 0; i < BTN_POOL; i++) {
+    const b = _btns[i];
+    if (!b.active || !b.cb) continue;
+    if (Input.mouse.x >= b.x && Input.mouse.x <= b.x + b.w &&
+        Input.mouse.y >= b.y && Input.mouse.y <= b.y + b.h) b.cb();
+  }
+}
+
+// ================================================================
+// DEBUG フラグ
+// ================================================================
+const Debug = {
+  overlay   : false,
+  hitbox    : false,
+  seedLock  : false,
+  slow      : false,
+  screenshot: false,
+  labels    : false,
+  aiDebug   : false,
+};
+
+// ================================================================
+// HITBOX POOL
+// ================================================================
+const HB_POOL = 64;
+const _hbs    = [];
+let   _hbLen  = 0;
+for (let i = 0; i < HB_POOL; i++) _hbs.push({ x:0, y:0, w:0, h:0, label:'' });
+
+function hbClear() { _hbLen = 0; }
+function hbAdd(x, y, w, h, label) {
+  if (_hbLen >= HB_POOL) return;
+  const hb = _hbs[_hbLen++];
+  hb.x = x; hb.y = y; hb.w = w; hb.h = h; hb.label = label;
+}
+function hbDraw() {
+  if (!Debug.hitbox) return;
+  ctx.save();
+  ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 1;
+  for (let i = 0; i < _hbLen; i++) {
+    const hb = _hbs[i];
+    ctx.strokeRect(hb.x, hb.y, hb.w, hb.h);
+    if (Debug.labels) {
+      ctx.fillStyle = '#ff4444'; ctx.font = '10px monospace';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+      ctx.fillText(hb.label, hb.x + 2, hb.y + 2);
+    }
+  }
+  ctx.restore();
+}
+
+// ================================================================
+// BUILD 0018: 遊び方モーダル グローバル状態
+// ================================================================
+let isHowToPlayOpen = false;
+
+// 角丸矩形ヘルパー（全シーン共通で使用）
+function _globalRRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ================================================================
+// SCENE MANAGER
+// ================================================================
+const _scenes = {};
+let _scene     = null;
+let _sceneName = 'none';
+
+const SceneManager = {
+  register(name, s)  { _scenes[name] = s; },
+  change(name) {
+    if (_scene && _scene.onExit) _scene.onExit();
+    clearButtons();
+    _scene     = _scenes[name] || null;
+    _sceneName = name;
+    if (_scene && _scene.onEnter) _scene.onEnter();
+  },
+  update(dt) { if (_scene && _scene.update) _scene.update(dt); },
+  render()   { if (_scene && _scene.render) _scene.render(); },
+  getName()  { return _sceneName; },
+};
+
+// ================================================================
+// SCENE: TITLE
+// ================================================================
+const TitleScene = (() => {
+  const STAR_N = 80;
+  const _sX = new Float32Array(STAR_N);
+  const _sY = new Float32Array(STAR_N);
+  const _sS = new Uint8Array(STAR_N);
+  {
+    let sx = 0x1234ABCD;
+    const rng = () => { sx ^= sx << 13; sx ^= sx >> 17; sx ^= sx << 5; return (sx >>> 0) / 0xFFFFFFFF; };
+    for (let i = 0; i < STAR_N; i++) {
+      _sX[i] = rng() * BASE_W; _sY[i] = rng() * BASE_H; _sS[i] = rng() > 0.75 ? 2 : 1;
+    }
+  }
+  let _bgGrad = null, _blinkT = 0, _blinkV = true;
+
+  return {
+    onEnter() {
+      _blinkT = 0; _blinkV = true;
+      _bgGrad = ctx.createLinearGradient(0, 0, 0, BASE_H);
+      _bgGrad.addColorStop(0, '#050514'); _bgGrad.addColorStop(0.5, '#160a2a'); _bgGrad.addColorStop(1, '#0c1808');
+      registerButton('t_start', BASE_W / 2 - 120, BASE_H * 0.90, 240, 52, 'START(PRESS SPACE)', () => {
+        _playerNickname = _nicknameInput.value.trim();
+        SceneManager.change('Game');
+      });
+      _nicknameInput.value = _playerNickname;
+      _repositionNicknameInput();
+      _nicknameInput.style.display = 'block';
+    },
+    onExit() {
+      _nicknameInput.style.display = 'none';
+    },
+    update(dt) {
+      _blinkT += dt;
+      if (_blinkT >= 0.5) { _blinkT = 0; _blinkV = !_blinkV; }
+      if (isHowToPlayOpen) return;  // BUILD 0018: モーダル中はゲーム操作を無効化
+      if (Input.isPressed('Space') && document.activeElement !== _nicknameInput) SceneManager.change('Game');
+      processClicks();
+    },
+    render() {
+      hbClear();
+
+      // (1) 背景（currentBgImage または グラデーション）+ 星
+      if (!_drawBgCover(0.50)) { ctx.fillStyle = _bgGrad; ctx.fillRect(0, 0, BASE_W, BASE_H); }
+      ctx.fillStyle = 'rgba(255,255,255,0.75)';
+      for (let i = 0; i < STAR_N; i++) ctx.fillRect(_sX[i], _sY[i], _sS[i], _sS[i]);
+
+      // (2) BUILD 0015: 集合イラスト（titleBgImage）- フルスクリーン表示
+      if (titleBgImage && titleBgImage.complete && titleBgImage.naturalWidth > 0) {
+        ctx.drawImage(titleBgImage, 0, 0, 1280, 720);
+      }
+
+      // (3) タイトルロゴ（titleLogoImage または テキストフォールバック）
+      if (titleLogoImage && titleLogoImage.complete && titleLogoImage.naturalWidth > 0) {
+        // BUILD 0017: 最大幅500pxに縮小、y=150 に配置
+        const maxW  = 500;
+        const scale = Math.min(maxW / titleLogoImage.naturalWidth, 1);
+        const w = titleLogoImage.naturalWidth  * scale;
+        const h = titleLogoImage.naturalHeight * scale;
+        const x = (BASE_W - w) / 2;
+        ctx.drawImage(titleLogoImage, x, 150, w, h);
+      } else {
+        ctx.save();
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 36;
+        ctx.fillStyle = '#ffaa00'; ctx.font = 'bold 62px serif';
+        ctx.fillText('ポーカー × ショット！', BASE_W / 2, BASE_H * 0.36);
+        ctx.shadowBlur = 0; ctx.restore();
+      }
+
+      // (4) STARTボタン
+      drawButton('t_start');
+      hbAdd(BASE_W / 2 - 120, BASE_H * 0.90, 240, 52, 'StartBtn');
+      hbDraw();
+    },
+  };
+})();
+
+// ================================================================
+// SCENE: GAME
+// ================================================================
+const GameScene = (() => {
+  // ── レイアウト定数 ──────────────────────────────────────────────
+  const AI_COUNT   = PLAYER_COUNT - 1;   // 5
+
+  // ベットフェーズセリフ（段階3）
+  const BET_STRONG_LINES = ['余裕っしょ', 'いただき', '楽勝', 'もらった'];
+  const BET_WEAK_LINES   = ['うわ…', 'やばい', 'まじか', 'きつい'];
+  // 交換フェーズ開始セリフ（段階1：カードを見た直後）
+  const S1_STRONG_LINES  = ['ふふっ', 'これは…', 'なるほどね'];
+  const S1_WEAK_LINES    = ['え…', 'ちょっと待って', 'うーん'];
+  // 交換フェーズ終了後セリフ（段階2：交換/スキップ確定直後）
+  const S2_SWAP_LINES    = ['あ、交換したか', '読めない…', '賭けか'];
+  const S2_KEEP_LINES    = ['自信あるんだ', '強気だな', '本当に？'];
+  const S2_RAND_LINES    = ['へぇ…', 'なるほど', 'そうか'];
+  // ── BUILD 0005: リアクションログ用セリフ ─────────────────────────
+  const REACT_EXCHANGE_SELF = ['交換しようかな', 'このままでいくか', 'リスクが高い…', 'どうするか…'];
+  const REACT_PLR_SWAPPED   = ['プレイヤーが交換した…読めない', '…なるほど、交換か', 'プレイヤーの手が読めない'];
+  const REACT_PLR_KEPT      = ['プレイヤーはそのままか。自信あるな', '強気だな、プレイヤー', 'そのままで行くのか…'];
+  const REACT_COMP_WIN      = ['には勝てそう', 'より有利かな', '…余裕かも'];
+  const REACT_COMP_LOSE     = ['のカード、強そう', 'が怖い', 'には勝てなさそう'];
+  const REACT_BET_INTENT    = ['ベットするか…', 'ここは降りておくか', '勝負に出るか', 'いくか…どうするか'];
+  const REACT_TABLE_TENSION = ['ショットが増えてきた', 'これは危ない', 'みんな緊張してる'];
+
+  const SLOT_W = 175, SLOT_H = 76;
+  // AI スロット中心座標
+  // 必要最低 cy = 8(余白) + NPC_CARD_H(64) + 4(gap) + NPC_IMG_H(200) + SLOT_H/2(38) = 314
+  const AI_POS = [
+    { x: 155,  y: 380 },   // 左端
+    { x: 390,  y: 360 },   // 左上
+    { x: 640,  y: 350 },   // 真上
+    { x: 890,  y: 360 },   // 右上
+    { x: 1125, y: 380 },   // 右端
+  ];
+  const TBL_CX = BASE_W / 2, TBL_CY = 490, TBL_RX = 255, TBL_RY = 80;
+  const PLR_X = BASE_W / 2 - 300, PLR_Y = BASE_H - 168, PLR_W = 600, PLR_H = 152;
+  const CARD_W = 64, CARD_H = 96;
+
+  // ベットフェーズボタン（交換フェーズと共通レイアウト）
+  const BET_BX = PLR_X + 350, FOLD_BX = PLR_X + 464;
+  const BET_BW = 104, BET_BH = 42, BET_BY_C = PLR_Y + 18;
+  // 決定ボタン（BET/FOLD・交換/キープの下）
+  const BET_DECIDE_BW = 120, BET_DECIDE_BH = 38;
+  const BET_DECIDE_BX = PLR_X + PLR_W / 2 - BET_DECIDE_BW / 2;  // センター寄り
+  const BET_DECIDE_BY = BET_BY_C + BET_BH + 8;   // ボタンの下段
+
+  // 交換フェーズボタン（ベットフェーズと同サイズ・同位置）
+  const _actBtns = [
+    { label: '交換',   x: BET_BX },
+    { label: 'キープ', x: FOLD_BX },
+    { label: '次へ',   x: BET_DECIDE_BX + 160 },  // 決定ボタンと同位置
+  ];
+  const ACT_BW = BET_BW, ACT_BH = BET_BH, ACT_BY = BET_BY_C;
+
+  // ── ゲーム状態 ─────────────────────────────────────────────────
+  const _state = {
+    phase: 'deal',        // deal / exchange / bet / show_decisions / hype / card_reveal / highlight_cards / judge / flip_drunk / show_result / bonus_display / fold_card_reveal / next
+    roundTimer: 0,
+    shotCount: 0,
+    playerCard: null,
+    playerSwapped: null,     // null=未決定  true=交換  false=キープ
+    playerSwappedProv: null, // 交換仮選択  null=未選択 true=交換 false=キープ
+    playerBet: null,         // null=未決定  true=ベット  false=フォールド
+    playerBetProv: null,     // ベット仮選択 null=未選択 true=ベット false=フォールド
+    aiCards:    [],
+    aiSwapped:  [],       // bool[]
+    aiDecision: [],       // string[]  フィードテキスト
+    aiBet:      [],       // bool[]
+    aiSpeech:   [],       // string[]  ベットフェーズセリフ
+    aiSpeech1:  [],       // string[]  段階1セリフ（交換フェーズ開始）
+    aiSpeech1T: [],       // float[]   段階1セリフ残り秒
+    aiSpeech2:  [],       // string[]  段階2セリフ（交換確定後）
+    aiSpeech2T: [],       // float[]   段階2セリフ残り秒
+    resolveTimer: 0,
+    resolveText: '',
+    foldText: '',             // フォールドした全員の「1杯」テキスト
+    resolveFlashT: 0,
+    resolveFlashOn: true,
+    elimNames: [],
+    elimTimer: 0,
+    revealTimer: 0,       // reveal フェーズ経過秒
+    // BUILD 0005
+    reactionLogIntervalT: 0,   // 次のインターバルリアクションまでの時間
+    subPhaseTimer: 0,          // show_decisions / show_result タイマー
+    hypeTimer: 0,              // hype フェーズ経過秒（カウントアップ）
+    hypeFlashAlpha: 0,         // hype フラッシュ透明度
+    hypeExclaim: [],           // hype フェーズ中の各AI感嘆符
+    // BUILD 0017: 吹き出しローテーション
+    speechRotationTimer: 0,    // 発言交代タイマー
+    speechActiveText: [],      // string[]  現在表示中の吹き出しテキスト（空=非表示）
+    // BUILD 0012
+    betElapsedT: 0,            // bet フェーズ経過秒（BET/FOLD表示遅延用）
+    betDecisionShown: false,   // BET/FOLD ラベル表示フラグ
+    highlightTimer: 0,         // highlight_cards フェーズタイマー
+    judgeTimer: 0,             // judge フェーズタイマー
+    judgeLoserIndices: [],     // 判定負け者インデックス（-1=human, 0〜=AI）
+    flipTimer: 0,              // flip_drunk フェーズタイマー
+    flipMidApplied: false,     // フリップ中間点で imageState 更新済みフラグ
+    flipTargets: [],           // フリップ対象 AI インデックス
+    // BUILD 0019: ボーナス画像表示
+    bonusQueue: [],            // { imageId, name }[] — 表示待ちエントリ
+    bonusDisplayTimer: 0,      // 表示タイマー（秒）
+    // BUILD 0021: 順位ダイアログ
+    // BUILD 0022: 引き継ぎショット（1人ベット時に次ラウンドへ持ち越す杯数）
+    carryOverShots: 0,
+    // 親システム
+    oyaIdx: -2,          // -2=未設定 -1=プレイヤー 0~=AI
+    oyaHint: null,       // null | 'high' | 'low'  (親のみ使えるヒント)
+    // 交換前カード
+    prevPlayerCard: null,
+    prevAiCards: [],
+  };
+  for (let i = 0; i < AI_COUNT; i++) {
+    _state.aiCards.push(null);   _state.aiSwapped.push(false);
+    _state.prevAiCards.push(null);
+    _state.aiDecision.push('');  _state.aiBet.push(false);
+    _state.aiSpeech.push('');    _state.aiSpeech1.push('');
+    _state.aiSpeech1T.push(0);   _state.aiSpeech2.push('');
+    _state.aiSpeech2T.push(0);   _state.hypeExclaim.push('');
+    _state.speechActiveText.push('');
+  }
+
+  // ── プレイヤーデータ ──────────────────────────────────────────
+  // _ai の実値は必ず _selectNPCs() で NPC_ROSTER から上書きされる
+  // 初期化値は使用されないが、0/空で明示しておく
+  const _ai = [];
+  for (let i = 0; i < AI_COUNT; i++) {
+    _ai.push({
+      name: '', personality: '', hp: INITIAL_HP, dispHp: INITIAL_HP, isAlive: true,
+      bluffRate: 0, betThreshold: 0, swapThreshold: 0,
+      imageId: '', imageState: 0, foldCount: 0,
+    });
+  }
+  const _human = { name: 'あなた', hp: INITIAL_HP, dispHp: INITIAL_HP, isAlive: true, imageState: 0, foldCount: 0 };
+
+  // NPC 選択用インデックスバッファ（プール）
+  const _npcIndices = [];
+  for (let i = 0; i < 16; i++) _npcIndices.push(0);
+
+  // ベット参加者バッファ（プール、resolve で使用）
+  const _betBuf = [];
+  for (let i = 0; i <= PLAYER_COUNT; i++) _betBuf.push({ who: -1, val: 0 });
+
+  // BUILD 0012: imageState スナップショット（フリップアニメ用）
+  const _prevAiImageStates = [];
+  const _newAiImageStates  = [];
+  for (let i = 0; i < AI_COUNT; i++) { _prevAiImageStates.push(0); _newAiImageStates.push(0); }
+
+  // ResultScene に渡す HP リスト（プール）
+  const _finalHpList = [];
+  for (let i = 0; i <= AI_COUNT; i++) _finalHpList.push({ name: '', hp: 0, isAlive: false });
+
+  let _tableGrad = null;
+
+  // ── BUILD 0011: ポーズ・やり直し ──────────────────────────────
+  let _isPaused     = false;
+  let _showConfirm  = false;   // やり直し確認ダイアログ表示中
+
+  // ゲームUI定数
+  const BTN_PAUSE_X = 1035, BTN_RESTART_X = 1155, BTN_Y = 14, BTN_W = 110, BTN_H = 36;
+  // BUILD 0013: つぎへスキップボタン定数
+  const SKIP_BX = 1140, SKIP_BY = 664, SKIP_BW = 120, SKIP_BH = 40;
+  // 確認ダイアログ定数
+  const CONFIRM_W = 360, CONFIRM_H = 140;
+  const CONFIRM_X = (BASE_W - CONFIRM_W) / 2, CONFIRM_Y = (BASE_H - CONFIRM_H) / 2;
+  const CONFIRM_YES_X = CONFIRM_X + 60,  CONFIRM_YES_W = 100, CONFIRM_YES_H = 38;
+  const CONFIRM_NO_X  = CONFIRM_X + 200, CONFIRM_NO_W  = 100, CONFIRM_NO_H  = 38;
+  const CONFIRM_BTN_Y = CONFIRM_Y + 82;
+
+  // ── BUILD 0005: リアクションログ ─────────────────────────────────
+  const _reactionLog = [];  // { name, text, age } - age は追加からの経過秒
+
+  function _addReactionEntry(name, text) {
+    const t = text.replace(/あなた/g, _human.name).replace(/プレイヤー/g, _human.name);
+    _reactionLog.push({ name: name, text: t, age: 0 });
+    if (_reactionLog.length > REACTION_LOG_MAX) _reactionLog.shift();
+  }
+
+  function _genReactionForNPC(i, trigger) {
+    if (!_ai[i].isAlive || !_state.aiCards[i]) return;
+    const myVal   = _state.aiCards[i].value;
+    const isBluff = Math.random() < _ai[i].bluffRate;
+    // BUILD 0016: キャラ別セリフ（未定義なら汎用フォールバック）
+    const sp = NPC_SPEECHES[_ai[i].imageId];
+
+    // 交換完了リアクション: プレイヤーの交換/キープについてコメント
+    if (trigger === 'exchange_done') {
+      const pool = _state.playerSwapped
+        ? (sp ? sp.swapped : REACT_PLR_SWAPPED)
+        : (sp ? sp.kept    : REACT_PLR_KEPT);
+      _addReactionEntry(_ai[i].name, pool[Math.floor(Math.random() * pool.length)]);
+      return;
+    }
+
+    const phase = _state.phase;
+    if (phase === 'exchange' || trigger === 'start') {
+      if (Math.random() < 0.40) {
+        // 自分の手の評価（strong/weak をキャラ別で）
+        const ev = _calcExpectedValue(i);
+        let isStrong = myVal > ev;
+        if (isBluff) isStrong = !isStrong;
+        const pool = sp ? (isStrong ? sp.strong : sp.weak) : REACT_EXCHANGE_SELF;
+        _addReactionEntry(_ai[i].name, pool[Math.floor(Math.random() * pool.length)]);
+      } else {
+        // 他者比較系
+        let targetName = null, targetVal = null;
+        if (Math.random() < 0.4 && _state.playerCard && _human.isAlive) {
+          targetName = _human.name; targetVal = _state.playerCard.value;
+        } else {
+          for (let tries = 0; tries < 5; tries++) {
+            const j = Math.floor(Math.random() * AI_COUNT);
+            if (j !== i && _ai[j].isAlive && _state.aiCards[j]) {
+              targetName = _ai[j].name; targetVal = _state.aiCards[j].value; break;
+            }
+          }
+        }
+        if (targetName !== null) {
+          let winning = myVal > targetVal;
+          if (isBluff) winning = !winning;
+          const pool = winning ? REACT_COMP_WIN : REACT_COMP_LOSE;
+          _addReactionEntry(_ai[i].name, targetName + pool[Math.floor(Math.random() * pool.length)]);
+        } else {
+          const ev = _calcExpectedValue(i);
+          let isStrong = myVal > ev;
+          if (isBluff) isStrong = !isStrong;
+          const pool = sp ? (isStrong ? sp.strong : sp.weak) : REACT_EXCHANGE_SELF;
+          _addReactionEntry(_ai[i].name, pool[Math.floor(Math.random() * pool.length)]);
+        }
+      }
+    } else {
+      // ベットフェーズ系: betIntent/foldIntent か tableTalk
+      let pool;
+      if (Math.random() < 0.5) {
+        // bluffRate を適用: 嘘つきキャラはベット/フォールドを逆に見せる
+        let aiBet = _state.aiBet[i];
+        if (Math.random() < _ai[i].bluffRate) aiBet = !aiBet;
+        pool = sp ? (aiBet ? sp.betIntent : sp.foldIntent) : REACT_BET_INTENT;
+      } else {
+        pool = sp ? sp.tableTalk : REACT_TABLE_TENSION;
+      }
+      _addReactionEntry(_ai[i].name, pool[Math.floor(Math.random() * pool.length)]);
+    }
+  }
+
+  function _genAllReactions(trigger) {
+    for (let i = 0; i < AI_COUNT; i++) _genReactionForNPC(i, trigger);
+  }
+
+  // ── BUILD 0017: 吹き出しローテーション ─────────────────────────
+  // 生存NPC の中から SPEECH_ACTIVE_COUNT 体をランダムに選び speechActiveText に書き込む
+  function _rotateSpeech() {
+    // 生存NPC インデックスを収集
+    const alive = [];
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive) alive.push(i);
+    }
+    // 全員クリア
+    for (let i = 0; i < AI_COUNT; i++) _state.speechActiveText[i] = '';
+    if (alive.length === 0) return;
+
+    // 末尾 Fisher-Yates で SPEECH_ACTIVE_COUNT 体をランダム選出
+    const n = alive.length;
+    const count = Math.min(SPEECH_ACTIVE_COUNT, n);
+    for (let i = n - 1; i >= n - count; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = alive[i]; alive[i] = alive[j]; alive[j] = t;
+    }
+
+    const ph = _state.phase;
+    for (let k = n - count; k < n; k++) {
+      const idx = alive[k];
+      const sp = NPC_SPEECHES[_ai[idx].imageId];
+      if (!sp) continue;
+      let pool;
+      if (ph === 'bet' || ph === 'show_decisions' || ph === 'hype' ||
+          ph === 'card_reveal' || ph === 'highlight_cards' || ph === 'judge' || ph === 'flip_drunk' ||
+          ph === 'show_result' || ph === 'fold_card_reveal') {
+        // カード開示後フェーズ: プレイヤーカードへの感想を優先（70%）
+        const cardRevealPhase = ph === 'card_reveal' || ph === 'highlight_cards' || ph === 'judge';
+        if (cardRevealPhase && _state.playerCard && _human.isAlive && Math.random() < 0.70) {
+          const pVal = _state.playerCard.value;
+          const isStrong = pVal >= 9;  // 9以上を「強い」と判定
+          pool = isStrong ? sp.playerCardStrong : sp.playerCardWeak;
+          if (!pool || pool.length === 0) pool = sp.tableTalk;
+        } else {
+          // プレイヤー確定後はプレイヤー向けセリフを優先（show_decisions/hype:65%、他:40%）
+          const playerDecided = _state.playerBet !== null && _human.isAlive;
+          const thresh = (ph === 'show_decisions' || ph === 'hype') ? 0.65 : 0.40;
+          if (playerDecided && Math.random() < thresh) {
+            // bluffRate を適用: 嘘つきはプレイヤーの行動を逆に反応する
+            let plrBet = _state.playerBet;
+            if (Math.random() < _ai[idx].bluffRate) plrBet = !plrBet;
+            pool = plrBet ? sp.playerBet : sp.playerFold;
+            if (!pool || pool.length === 0) {
+              let aiBet2 = _state.aiBet[idx];
+              if (Math.random() < _ai[idx].bluffRate) aiBet2 = !aiBet2;
+              pool = aiBet2 ? sp.betIntent : sp.foldIntent;
+            }
+          } else {
+            // bluffRate を適用: 自分のbetIntent/foldIntentも逆に見せる
+            let aiBet = _state.aiBet[idx];
+            if (Math.random() < _ai[idx].bluffRate) aiBet = !aiBet;
+            pool = Math.random() < 0.5
+              ? (aiBet ? sp.betIntent : sp.foldIntent)
+              : sp.tableTalk;
+          }
+        }
+      } else {
+        // 交換フェーズ系: プレイヤーカード感想(40%) or 自分のstrong/weak(60%)
+        const playerCardVisible = _state.playerCard && _human.isAlive;
+        if (playerCardVisible && Math.random() < 0.40) {
+          // bluffRate を適用: NPCはカードを見えているが嘘をつく可能性がある
+          let plrStrong = _state.playerCard.value >= 9;
+          if (Math.random() < _ai[idx].bluffRate) plrStrong = !plrStrong;
+          pool = plrStrong ? sp.playerCardStrong : sp.playerCardWeak;
+          if (!pool || pool.length === 0) {
+            pool = plrStrong ? sp.strong : sp.weak;
+          }
+        } else {
+          const myVal = _state.aiCards[idx] ? _state.aiCards[idx].value : 8;
+          const ev    = _calcExpectedValue(idx);
+          let isStrong = myVal > ev;
+          if (Math.random() < _ai[idx].bluffRate) isStrong = !isStrong;
+          pool = isStrong ? sp.strong : sp.weak;
+        }
+      }
+      const _line = pool[Math.floor(Math.random() * pool.length)];
+      _state.speechActiveText[idx] = _line.replace(/あなた/g, _human.name).replace(/プレイヤー/g, _human.name);
+    }
+  }
+
+  // ── ヘルパー ──────────────────────────────────────────────────
+
+  function _inRect(x, y, w, h) {
+    return Input.mouse.x >= x && Input.mouse.x <= x + w &&
+           Input.mouse.y >= y && Input.mouse.y <= y + h;
+  }
+
+  function _countAlive() {
+    let n = _human.isAlive ? 1 : 0;
+    for (let i = 0; i < AI_COUNT; i++) if (_ai[i].isAlive) n++;
+    return n;
+  }
+
+  function _getWinnerName() {
+    if (_human.isAlive) return _human.name;
+    for (let i = 0; i < AI_COUNT; i++) if (_ai[i].isAlive) return _ai[i].name;
+    return '???';
+  }
+
+  // ── フェーズ処理 ──────────────────────────────────────────────
+
+  // NPC_ROSTER からランダム非重複で AI_COUNT 体を選択
+  function _selectNPCs() {
+    const n = NPC_ROSTER.length;
+    for (let i = 0; i < n; i++) _npcIndices[i] = i;
+    // 末尾 AI_COUNT 要素に選択結果を集める部分 Fisher-Yates
+    for (let i = n - 1; i >= n - AI_COUNT; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      const t = _npcIndices[i]; _npcIndices[i] = _npcIndices[j]; _npcIndices[j] = t;
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      const npc = NPC_ROSTER[_npcIndices[n - 1 - i]];
+      _ai[i].name          = npc.name;
+      _ai[i].personality   = npc.personality;
+      _ai[i].bluffRate     = npc.bluffRate;
+      _ai[i].betThreshold  = npc.betThreshold;
+      _ai[i].swapThreshold = npc.swapThreshold;
+      _ai[i].imageId       = npc.imageId;
+      _ai[i].hp            = INITIAL_HP;
+      _ai[i].dispHp        = INITIAL_HP;
+      _ai[i].isAlive       = true;
+      _ai[i].imageState    = 0;
+      _ai[i].foldCount     = 0;
+    }
+  }
+
+  function _decideAISwap(idx) {
+    return !!_state.aiCards[idx] && _state.aiCards[idx].value <= _ai[idx].swapThreshold;
+  }
+
+  // 段階1セリフ生成（交換フェーズ開始時：カードを見た直後）
+  function _genSpeech1() {
+    const playerVal = _state.playerCard ? _state.playerCard.value : 8;
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive) { _state.aiSpeech1[i] = ''; _state.aiSpeech1T[i] = 0; continue; }
+      let isStrong = playerVal < _ai[i].betThreshold;
+      if (Math.random() < _ai[i].bluffRate) isStrong = !isStrong;
+      const sp = NPC_SPEECHES[_ai[i].imageId];
+      const pool = sp ? (isStrong ? sp.strong : sp.weak)
+                      : (isStrong ? S1_STRONG_LINES : S1_WEAK_LINES);
+      _state.aiSpeech1[i]  = pool[Math.floor(Math.random() * pool.length)];
+      _state.aiSpeech1T[i] = SPEECH_DURATION;
+    }
+  }
+
+  // 段階2セリフ生成（プレイヤーの交換/スキップ確定直後）
+  function _genSpeech2() {
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive) { _state.aiSpeech2[i] = ''; _state.aiSpeech2T[i] = 0; continue; }
+      const sp = NPC_SPEECHES[_ai[i].imageId];
+      let pool;
+      if (Math.random() < _ai[i].bluffRate) {
+        pool = S2_RAND_LINES;
+      } else if (sp) {
+        pool = _state.playerSwapped ? sp.swapped : sp.kept;
+      } else {
+        pool = _state.playerSwapped ? S2_SWAP_LINES : S2_KEEP_LINES;
+      }
+      _state.aiSpeech2[i]  = pool[Math.floor(Math.random() * pool.length)];
+      _state.aiSpeech2T[i] = SPEECH_DURATION;
+    }
+  }
+
+  // 自分以外の見えているカードを除いた残りデッキの平均値
+  function _calcExpectedValue(aiIdx) {
+    // フル52枚デッキ合計 = (2+3+...+14) × 4 = 416
+    const FULL_SUM = 416, FULL_COUNT = 52;
+    let vSum = 0, vCnt = 0;
+    if (_state.playerCard && _human.isAlive) { vSum += _state.playerCard.value; vCnt++; }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (i !== aiIdx && _ai[i].isAlive && _state.aiCards[i]) {
+        vSum += _state.aiCards[i].value; vCnt++;
+      }
+    }
+    return vCnt < FULL_COUNT ? (FULL_SUM - vSum) / (FULL_COUNT - vCnt) : 8;
+  }
+
+  function _dealCards() {
+    _state.playerCard = _human.isAlive ? Deck.draw() : null;
+    for (let i = 0; i < AI_COUNT; i++) {
+      _state.aiCards[i]    = _ai[i].isAlive ? Deck.draw() : null;
+      _state.aiSwapped[i]  = _ai[i].isAlive ? _decideAISwap(i) : false;
+      _state.aiDecision[i] = '';
+      _state.aiBet[i]      = false;
+      _state.aiSpeech[i]   = '';
+      _state.aiSpeech1[i]  = ''; _state.aiSpeech1T[i] = 0;
+      _state.aiSpeech2[i]  = ''; _state.aiSpeech2T[i] = 0;
+    }
+    _genSpeech1();
+    _reactionLog.length = 0;
+    _state.reactionLogIntervalT = REACTION_INTERVAL;
+    _genAllReactions('start');
+    _state.speechRotationTimer = 0;
+    _rotateSpeech();
+  }
+
+  function _startRound() {
+    // BUILD 0013: ゲーム開始ごとにランダム背景を選択
+    const _validBgs = bgImages.filter(img => img && img.complete && img.naturalWidth > 0);
+    currentBgImage = _validBgs.length > 0
+      ? _validBgs[Math.floor(Math.random() * _validBgs.length)]
+      : null;
+
+    _human.hp = INITIAL_HP; _human.dispHp = INITIAL_HP; _human.isAlive = true; _human.imageState = 0; _human.foldCount = 0;
+    _state.carryOverShots = 0;  // BUILD 0022: ゲーム開始時のみリセット（ラウンドをまたいで引き継ぐ）
+    _selectNPCs();   // NPC_ROSTER からランダム選択（各AI の imageState も 0 にリセット）
+    Deck.init();
+    _state.playerSwapped = null;
+    _state.playerBet     = null;
+    _state.playerBetProv = null;
+    _state.shotCount     = 0;
+    _state.resolveText   = '';
+    _state.foldText      = '';
+    _state.elimNames.length = 0;
+    _state.elimTimer     = 0;
+    _state.revealTimer        = 0;
+    _state.subPhaseTimer      = 0;
+    _state.hypeTimer          = 0;
+    _state.hypeFlashAlpha     = 0;
+    // BUILD 0012
+    _state.betElapsedT        = 0;
+    _state.betDecisionShown   = false;
+    _state.highlightTimer     = 0;
+    _state.judgeTimer         = 0;
+    _state.judgeLoserIndices.length = 0;
+    _state.flipTimer          = 0;
+    _state.flipMidApplied     = false;
+    _state.flipTargets.length = 0;
+    // BUILD 0021
+    _state.prevPlayerCard = null;
+    for (let i = 0; i < AI_COUNT; i++) _state.prevAiCards[i] = null;
+    _dealCards();
+    _selectOya();
+    _state.phase         = 'deal';
+  }
+
+  function _executeAISwaps() {
+    if (_state.playerSwapped === true && _human.isAlive) {
+      _state.prevPlayerCard = _state.playerCard;  // 交換前カードを保存
+      _state.playerCard = Deck.draw();
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive) continue;
+      if (_state.aiSwapped[i]) {
+        _state.prevAiCards[i] = _state.aiCards[i];  // 交換前カードを保存
+        _state.aiCards[i]    = Deck.draw();
+        _state.aiDecision[i] = _ai[i].name + 'がカードを交換！';
+      } else {
+        _state.aiDecision[i] = _ai[i].name + 'はそのまま';
+      }
+    }
+    _genAllReactions('exchange_done');
+  }
+
+  // 場の全カード平均値を計算
+  function _calcCardAverage() {
+    let sum = 0, cnt = 0;
+    if (_human.isAlive && _state.playerCard) { sum += _state.playerCard.value; cnt++; }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiCards[i]) { sum += _state.aiCards[i].value; cnt++; }
+    }
+    return cnt > 0 ? sum / cnt : 8;
+  }
+
+  // 親を選出（初回ランダム・以降は時計回りローテーション）
+  // ハンデ: フォールド時のショットが+1（ベットして勝てばダメージなし）
+  const _OYA_ORDER = [-1, ...Array.from({length: AI_COUNT}, (_, i) => i)];
+  function _selectOya() {
+    const isAlive = idx => idx === -1 ? _human.isAlive : _ai[idx].isAlive;
+    if (_state.oyaIdx === -2) {
+      // 初回: 生存者からランダム
+      const cands = _OYA_ORDER.filter(isAlive);
+      if (cands.length === 0) { _state.oyaIdx = -2; return; }
+      _state.oyaIdx = cands[Math.floor(Math.random() * cands.length)];
+    } else {
+      // 時計回りに次の生存者を選ぶ
+      const cur = _OYA_ORDER.indexOf(_state.oyaIdx);
+      const n = _OYA_ORDER.length;
+      for (let step = 1; step <= n; step++) {
+        const next = _OYA_ORDER[(cur + step) % n];
+        if (isAlive(next)) { _state.oyaIdx = next; break; }
+      }
+    }
+  }
+
+  function _startBetPhase() {
+    _state.phase             = 'bet';
+    _state.roundTimer        = BET_TIMER;
+    _state.playerBet         = null;
+    _state.playerBetProv     = null;  // 仮選択リセット
+    _state.betElapsedT       = 0;
+    _state.betDecisionShown  = false;  // プレイヤー決定時にtrueにする
+    // AI思考: 期待値計算 → ベット/フォールド判断 → セリフ生成（BUILD 0016: キャラ別）
+    const _avgVal = _calcCardAverage();  // 親の特殊能力用
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive) { _state.aiBet[i] = false; _state.aiSpeech[i] = ''; continue; }
+      let wantBet;
+      if (i === _state.oyaIdx) {
+        // 親: 自分のカードが平均以上かどうかを正確に知っている
+        wantBet = !!_state.aiCards[i] && _state.aiCards[i].value >= _avgVal;
+      } else {
+        const ev    = _calcExpectedValue(i);
+        // BUILD 0024: 酔い状態に応じて betThreshold を引き下げ（酔うほどベットしやすい）
+        const effThreshold = _ai[i].betThreshold - DRUNK_BET_DELTA[_ai[i].imageState];
+        wantBet = ev >= effThreshold;
+        if (Math.random() < _ai[i].bluffRate) wantBet = !wantBet;
+      }
+      _state.aiBet[i] = wantBet;
+      const sp = NPC_SPEECHES[_ai[i].imageId];
+      const pool = sp ? (wantBet ? sp.betIntent : sp.foldIntent)
+                      : (wantBet ? BET_STRONG_LINES : BET_WEAK_LINES);
+      _state.aiSpeech[i] = pool[Math.floor(Math.random() * pool.length)];
+    }
+    // プレイヤーが親の場合: ヒント計算（場の平均と自カードを比較）
+    if (_state.oyaIdx === -1 && _state.playerCard && _human.isAlive) {
+      _state.oyaHint = _state.playerCard.value >= _avgVal ? 'high' : 'low';
+    } else {
+      _state.oyaHint = null;
+    }
+    // BUILD 0017: ベットフェーズ移行時に吹き出し即入れ替え
+    _state.speechRotationTimer = 0;
+    _rotateSpeech();
+  }
+
+  // HP を減算し、脱落（一気に0）でない場合のみ imageState を更新
+  // A-2 特殊ルール: A と 2 が同時にベット中なら 2 を最強カード(ACE_VALUE+1)として扱う
+  function _applyA2Rule(bLen) {
+    let hasAce = false, hasTwo = false;
+    for (let i = 0; i < bLen; i++) {
+      if (_betBuf[i].val === ACE_VALUE) hasAce = true;
+      if (_betBuf[i].val === 2) hasTwo = true;
+    }
+    if (hasAce && hasTwo) {
+      for (let i = 0; i < bLen; i++) {
+        if (_betBuf[i].val === 2) _betBuf[i].val = ACE_VALUE + 1;
+      }
+    }
+  }
+
+  function _applyDamage(player, amount) {
+    player.hp = Math.max(0, player.hp - amount);
+    // imageState / dispHp の更新は judge 終了後に行う
+  }
+
+  // HP から新しい imageState を算出（酔いゲージ更新タイミング用）
+  function _calcNewImageState(hp, curState) {
+    if (hp <= 0) return curState;  // 脱落時は変えない
+    if (hp <= NPC_IMG_STATE2_HP) return 2;
+    if (hp <= NPC_IMG_STATE1_HP) return 1;
+    return curState;
+  }
+
+  function _resolveRound() {
+    // (a) フォールド者 → ペナルティ計算 + ダメージ（4回目以降 1+ペナルティ杯）
+    _state.foldText = '';
+    if (_state.playerBet === false && _human.isAlive) {
+      _human.foldCount++;
+      const hPenalty = Math.max(0, _human.foldCount - 3);
+      const hOya     = _state.oyaIdx === -1 ? 1 : 0;  // 親ハンデ+1
+      const hShots   = 1 + hPenalty + hOya;
+      _applyDamage(_human, SHOT_DAMAGE * hShots);
+      const hPenStr = hPenalty > 0 ? `（${_human.foldCount}回目 ペナルティ+${hPenalty}）` : '';
+      const hOyaStr = hOya > 0 ? ' ＋親ハンデ' : '';
+      _state.foldText += _human.name + ` がフォールド → ${hShots}ショット${hPenStr}${hOyaStr}\n`;
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiBet[i] === false) {
+        _ai[i].foldCount++;
+        const penalty = Math.max(0, _ai[i].foldCount - 3);
+        const oyaBonus = _state.oyaIdx === i ? 1 : 0;  // 親ハンデ+1
+        const shots    = 1 + penalty + oyaBonus;
+        _applyDamage(_ai[i], SHOT_DAMAGE * shots);
+        const penStr = penalty > 0 ? `（${_ai[i].foldCount}回目 ペナルティ+${penalty}）` : '';
+        const oyaStr = oyaBonus > 0 ? ' ＋親ハンデ' : '';
+        _state.foldText += _ai[i].name + ` がフォールド → ${shots}ショット${penStr}${oyaStr}\n`;
+      }
+    }
+
+    // (b) ベット参加者を収集
+    let bLen = 0;
+    if (_state.playerBet === true && _human.isAlive && _state.playerCard) {
+      _betBuf[bLen].who = -1; _betBuf[bLen].val = _state.playerCard.value; bLen++;
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiBet[i] === true && _state.aiCards[i]) {
+        _betBuf[bLen].who = i; _betBuf[bLen].val = _state.aiCards[i].value; bLen++;
+      }
+    }
+    _state.shotCount = bLen;
+
+    if (bLen === 1) {
+      // BUILD 0022: 1人のみベット → ダメージなし、ショット引き継ぎ
+      _state.carryOverShots += 1;
+      _state.resolveText = 'ノーコンテスト → ' + _state.carryOverShots + 'ショット持ち越し！';
+    } else if (bLen >= 2) {
+      // A-2 特殊ルール: A と 2 が同時にベット中なら 2 を最強カードとして扱う
+      _applyA2Rule(bLen);
+      // (c) 最小値を抽出
+      let minVal = _betBuf[0].val;
+      for (let i = 1; i < bLen; i++) if (_betBuf[i].val < minVal) minVal = _betBuf[i].val;
+
+      // (d) 最下位全員にダメージ（引き継ぎ分・親ハンデを上乗せ）
+      const oyaBonus   = _calcOyaHandicap();
+      const totalShots = bLen + _state.carryOverShots + oyaBonus;
+      const carryStr   = _state.carryOverShots > 0 ? `（前回ノーコンテスト+${_state.carryOverShots}ショット）` : '';
+      const oyaStr     = oyaBonus > 0 ? '' : '';
+      _state.resolveText = '';
+      for (let i = 0; i < bLen; i++) {
+        if (_betBuf[i].val !== minVal) continue;
+        const nm = _betBuf[i].who === -1 ? _human.name : _ai[_betBuf[i].who].name;
+        if (_state.resolveText) _state.resolveText += '・';
+        _state.resolveText += nm;
+        if (_betBuf[i].who === -1) {
+          _applyDamage(_human, SHOT_DAMAGE * totalShots);
+        } else {
+          _applyDamage(_ai[_betBuf[i].who], SHOT_DAMAGE * totalShots);
+        }
+      }
+      _state.resolveText += ' に ' + totalShots + ' ショット！' + carryStr + oyaStr;
+      _state.carryOverShots = 0;  // 解決後リセット
+    } else {
+      // 全員フォールド（折り込み済みダメージのみ）。carryOverShots は持ち越し
+      _state.resolveText = '全員フォールド！ 各自 1 ショット';
+    }
+  }
+
+  // BUILD 0013: スキップ対象フェーズ判定
+  function _isSkipPhase() {
+    const p = _state.phase;
+    return p === 'show_decisions' || p === 'hype' || p === 'highlight_cards' ||
+           p === 'judge' || p === 'flip_drunk' ||
+           p === 'show_result' || p === 'bonus_display' || p === 'fold_card_reveal';
+  }
+
+  // BUILD 0013: 現在フェーズのタイマーを末尾値に設定して即座にスキップ
+  function _skipPhase() {
+    const p = _state.phase;
+    if (p === 'show_decisions') {
+      _state.subPhaseTimer  = 0;
+    } else if (p === 'hype') {
+      _state.hypeTimer      = HYPE_DURATION;
+      _state.hypeFlashAlpha = 0;
+    } else if (p === 'highlight_cards') {
+      _state.highlightTimer = HIGHLIGHT_CARDS_TIME;
+    } else if (p === 'judge') {
+      _state.judgeTimer     = JUDGE_TIME;
+    } else if (p === 'flip_drunk') {
+      // 中間点未適用なら先に imageState を確定させてからスキップ
+      if (!_state.flipMidApplied) {
+        _state.flipMidApplied = true;
+        for (let k = 0; k < _state.flipTargets.length; k++) {
+          _ai[_state.flipTargets[k]].imageState = _newAiImageStates[_state.flipTargets[k]];
+        }
+      }
+      _state.flipTimer = NPC_FLIP_HALF_DUR * 2;
+    } else if (p === 'show_result') {
+      if (_state.elimTimer > 0) {
+        _state.elimTimer = 0;
+      } else {
+        _state.subPhaseTimer = 0;
+      }
+    } else if (p === 'bonus_display') {
+      // BUILD 0019: タイマーを即終了させて次フレームで advance
+      _state.bonusDisplayTimer = 0;
+    } else if (p === 'fold_card_reveal') {
+      _state.revealTimer = FOLD_REVEAL_TIME;
+    }
+  }
+
+  // BUILD 0012: ベット参加者数だけ先に計算（hype 表示用、ダメージなし）
+  // 親がベット参加しているならテーブルに+1ショットを加算するハンデ値を返す
+  function _calcOyaHandicap() {
+    if (_state.oyaIdx === -1 && _state.playerBet === true && _human.isAlive) return 1;
+    if (_state.oyaIdx >= 0 && _ai[_state.oyaIdx] && _ai[_state.oyaIdx].isAlive &&
+        _state.aiBet[_state.oyaIdx] === true) return 1;
+    return 0;
+  }
+
+  function _preBetCalc() {
+    let bLen = 0;
+    if (_state.playerBet === true && _human.isAlive && _state.playerCard) bLen++;
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiBet[i] === true && _state.aiCards[i]) bLen++;
+    }
+    // BUILD 0022: 2人以上ベット時は引き継ぎ分・親ハンデも加算してhype表示を正確に
+    _state.shotCount = bLen >= 2 ? bLen + _state.carryOverShots + _calcOyaHandicap() : bLen;
+  }
+
+  // BUILD 0012: ベット参加者の中で最小値を持つ者のインデックスを _state.judgeLoserIndices に格納
+  function _findBetLosers() {
+    _state.judgeLoserIndices.length = 0;
+    let bLen = 0;
+    if (_state.playerBet === true && _human.isAlive && _state.playerCard) {
+      _betBuf[bLen].who = -1; _betBuf[bLen].val = _state.playerCard.value; bLen++;
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiBet[i] === true && _state.aiCards[i]) {
+        _betBuf[bLen].who = i; _betBuf[bLen].val = _state.aiCards[i].value; bLen++;
+      }
+    }
+    if (bLen > 0) {
+      // A-2 特殊ルール
+      _applyA2Rule(bLen);
+      let minVal = _betBuf[0].val;
+      for (let i = 1; i < bLen; i++) if (_betBuf[i].val < minVal) minVal = _betBuf[i].val;
+      for (let i = 0; i < bLen; i++) {
+        if (_betBuf[i].val === minVal) _state.judgeLoserIndices.push(_betBuf[i].who);
+      }
+    }
+  }
+
+  function _checkEliminationsAndAdvance() {
+    // HP <= 0 → isAlive = false
+    _state.elimNames.length = 0;
+    _state.bonusQueue.length = 0;  // BUILD 0019: このラウンドのボーナスキューをリセット
+    if (_human.isAlive && _human.hp <= 0) {
+      _human.isAlive = false; _state.elimNames.push(_human.name);
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _ai[i].hp <= 0) {
+        _ai[i].isAlive = false; _state.elimNames.push(_ai[i].name);
+        // BUILD 0019: プレイヤーがベット中だった場合のみボーナス画像を予約
+        if (_state.playerBet === true) {
+          _state.bonusQueue.push({ imageId: _ai[i].imageId, name: _ai[i].name });
+        }
+      }
+    }
+    if (_state.elimNames.length > 0) {
+      _state.elimTimer = ELIMINATION_PAUSE;
+    } else {
+      _advanceAfterResolve();
+    }
+  }
+
+  function _advanceAfterResolve() {
+    // BUILD 0020: bonusQueue が残っていれば先に消化（最終一騎打ち勝利時も対応）
+    if (_state.bonusQueue.length > 0) {
+      _state.bonusDisplayTimer = BONUS_TEXT_DURATION + BONUS_IMG_DURATION;
+      _state.phase = 'bonus_display';
+      return;
+    }
+    if (_countAlive() <= 1) {
+      _fillFinalHpList();
+      ResultScene.setup(_getWinnerName(), _human.isAlive, _finalHpList, AI_COUNT + 1);
+      SceneManager.change('Result');
+    } else {
+      _state.phase = 'next';
+    }
+  }
+
+
+  // _finalHpList を現在の全プレイヤー状態で埋める
+  function _fillFinalHpList() {
+    _finalHpList[0].name = _human.name; _finalHpList[0].hp = _human.hp; _finalHpList[0].isAlive = _human.isAlive;
+    for (let i = 0; i < AI_COUNT; i++) {
+      _finalHpList[i + 1].name    = _ai[i].name;
+      _finalHpList[i + 1].hp      = _ai[i].hp;
+      _finalHpList[i + 1].isAlive = _ai[i].isAlive;
+    }
+  }
+
+  // 脱落者検出（judge終了時に呼ぶ）
+  function _detectEliminations() {
+    _state.elimNames.length = 0;
+    _state.bonusQueue.length = 0;
+    if (_human.isAlive && _human.hp <= 0) {
+      _human.isAlive = false; _state.elimNames.push(_human.name);
+    }
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _ai[i].hp <= 0) {
+        _ai[i].isAlive = false; _state.elimNames.push(_ai[i].name);
+        if (_state.playerBet === true) {
+          _state.bonusQueue.push({ imageId: _ai[i].imageId, name: _ai[i].name });
+        }
+      }
+    }
+    // プレイヤーが脱落した → 即ゲームオーバー（リザルト画面へ）
+    if (!_human.isAlive) {
+      _fillFinalHpList();
+      ResultScene.setup(_getWinnerName(), false, _finalHpList, AI_COUNT + 1);
+      SceneManager.change('Result');
+    }
+  }
+
+  // BUILD 0021: show_result 終了後の遷移
+  function _advanceAfterShowResult() {
+    if (_state.playerBet === false && _human.isAlive) {
+      // フォールドの場合: カード開示フェーズへ
+      _state.phase = 'fold_card_reveal';
+      _state.revealTimer = 0;
+    } else {
+      // ゲーム終了チェック
+      if (_countAlive() <= 1) {
+        _fillFinalHpList();
+        ResultScene.setup(_getWinnerName(), _human.isAlive, _finalHpList, AI_COUNT + 1);
+        SceneManager.change('Result');
+      } else {
+        _state.phase = 'next';
+      }
+    }
+  }
+
+  function _startNextRound() {
+    Deck.init();
+    _state.playerCard        = _human.isAlive ? Deck.draw() : null;
+    _state.playerSwapped     = null;
+    _state.playerSwappedProv = null;
+    _state.playerBet         = null;
+    _state.playerBetProv     = null;
+    _state.shotCount     = 0;
+    _state.resolveText   = '';
+    _state.foldText      = '';
+    _state.elimNames.length = 0;
+    _state.elimTimer     = 0;
+    _state.revealTimer   = 0;
+    for (let i = 0; i < AI_COUNT; i++) {
+      _state.aiCards[i]    = _ai[i].isAlive ? Deck.draw() : null;
+      _state.aiSwapped[i]  = _ai[i].isAlive ? _decideAISwap(i) : false;
+      _state.aiDecision[i] = '';
+      _state.aiBet[i]      = false;
+      _state.aiSpeech[i]   = '';
+      _state.aiSpeech1[i]  = ''; _state.aiSpeech1T[i] = 0;
+      _state.aiSpeech2[i]  = ''; _state.aiSpeech2T[i] = 0;
+      _state.speechActiveText[i] = '';
+    }
+    _state.subPhaseTimer      = 0;
+    _state.hypeTimer          = 0;
+    _state.hypeFlashAlpha     = 0;
+    // BUILD 0012
+    _state.betElapsedT        = 0;
+    _state.betDecisionShown   = false;
+    _state.highlightTimer     = 0;
+    _state.judgeTimer         = 0;
+    _state.judgeLoserIndices.length = 0;
+    _state.flipTimer          = 0;
+    _state.flipMidApplied     = false;
+    _state.flipTargets.length = 0;
+    // BUILD 0019
+    _state.bonusQueue.length  = 0;
+    _state.bonusDisplayTimer  = 0;
+    // BUILD 0021
+    _reactionLog.length       = 0;
+    _state.reactionLogIntervalT = REACTION_INTERVAL;
+    _state.speechRotationTimer  = 0;
+    _state.prevPlayerCard = null;
+    for (let i = 0; i < AI_COUNT; i++) _state.prevAiCards[i] = null;
+    _selectOya();
+    _genSpeech1();
+    _genAllReactions('start');
+    _rotateSpeech();
+    _state.phase      = 'exchange';
+    _state.roundTimer = EXCHANGE_TIMER;
+  }
+
+  // ── 描画ヘルパー ──────────────────────────────────────────────
+
+  // BUILD 0025: 酔いメーター（飲んだ分だけ左から埋まる）
+  function drawHpBar(x, y, w, h, hp) {
+    const pct = Math.max(0, (INITIAL_HP - hp) / INITIAL_HP);
+    ctx.fillStyle = '#222233'; ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = pct < 0.5 ? '#c8a030' : pct < 0.8 ? '#e06010' : '#cc2020';
+    ctx.fillRect(x, y, w * pct, h);
+    ctx.strokeStyle = '#445566'; ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, w, h);
+  }
+
+  function drawCardBack(x, y, w, h) {
+    ctx.fillStyle = '#0e1f44'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = '#4488cc'; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+    ctx.strokeStyle = '#223366'; ctx.lineWidth = 1; ctx.strokeRect(x+4, y+4, w-8, h-8);
+    ctx.fillStyle = '#3377cc';
+    ctx.font = `bold ${Math.floor(h * 0.45)}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('?', x + w / 2, y + h / 2);
+  }
+
+  function drawCardFront(x, y, w, h, card) {
+    // ジョーカー描画
+    if (card.suit === 'j') {
+      ctx.fillStyle = '#fffaf8'; ctx.fillRect(x, y, w, h);
+      ctx.strokeStyle = '#aa00cc'; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = '#aa00cc';
+      ctx.font = `bold ${Math.floor(h * 0.32)}px serif`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('JK', x + w / 2, y + h * 0.30);
+      ctx.font = `${Math.floor(h * 0.26)}px serif`;
+      ctx.fillText('★', x + w / 2, y + h * 0.68);
+      return;
+    }
+    const isRed = card.suit === 'h' || card.suit === 'd';
+    const col   = isRed ? '#cc2222' : '#111111';
+    const sym   = { s: '♠', h: '♥', d: '♦', c: '♣' }[card.suit] || '?';
+    const val   = card.value <= 10 ? String(card.value) : ['J','Q','K','A'][card.value - 11];
+    ctx.fillStyle = '#fffaf8'; ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle = col;
+    // 数字: 上部28%に配置、フォントh*0.38 → スートと重ならない
+    ctx.font = `bold ${Math.floor(h * 0.38)}px serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(val, x + w / 2, y + h * 0.28);
+    // スート: 下部70%に配置、フォントh*0.30
+    ctx.font = `${Math.floor(h * 0.30)}px serif`;
+    ctx.fillText(sym, x + w / 2, y + h * 0.70);
+  }
+
+  // BUILD 0017: 半透明黒オーバーレイ（しっぽなし・キャラ画像下部に重ねる）
+  // portraitTopY = キャラ画像の上端 Y 座標
+  function drawSpeechBubble(cx, portraitTopY, text) {
+    const BW = NPC_IMG_W;          // 幅 = キャラ画像幅
+    const PAD_X = 6, PAD_Y = 4, LINE_H = 16;
+    ctx.font = '12px sans-serif';
+    const innerW = BW - PAD_X * 2;
+
+    // テキスト折り返し（最大2行、2行目は省略記号でクランプ）
+    const lines = [];
+    const fullW = ctx.measureText(text).width;
+    if (fullW <= innerW) {
+      lines.push(text);
+    } else {
+      let si = text.length;
+      for (let k = 1; k < text.length; k++) {
+        if (ctx.measureText(text.slice(0, k)).width > innerW) { si = k - 1; break; }
+      }
+      lines.push(text.slice(0, si));
+      const rest = text.slice(si);
+      if (ctx.measureText(rest).width <= innerW) {
+        lines.push(rest);
+      } else {
+        let si2 = rest.length;
+        for (let k = 1; k < rest.length; k++) {
+          if (ctx.measureText(rest.slice(0, k) + '…').width > innerW) { si2 = k - 1; break; }
+        }
+        lines.push(rest.slice(0, si2) + '…');
+      }
+    }
+
+    const bh = PAD_Y * 2 + LINE_H * lines.length;
+    const bx = cx - BW / 2;
+    // 画像下端から 40px 上を基準（オーバーレイ上端）
+    const by = portraitTopY + NPC_IMG_H - 40;
+
+    ctx.save();
+    _roundRect(bx, by, BW, bh, 6);
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
+    ctx.fill();
+    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let k = 0; k < lines.length; k++) {
+      ctx.fillText(lines[k], cx, by + PAD_Y + LINE_H / 2 + k * LINE_H);
+    }
+    ctx.restore();
+  }
+
+  function drawInlineButton(x, y, w, h, label, colNorm, colHov, borderCol) {
+    const hov = _inRect(x, y, w, h);
+    ctx.fillStyle   = hov ? colHov : colNorm;
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = borderCol; ctx.lineWidth = hov ? 2 : 1;
+    ctx.strokeRect(x, y, w, h);
+    ctx.fillStyle    = hov ? '#000' : '#fff';
+    ctx.font         = 'bold 14px monospace';
+    ctx.textAlign    = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + w / 2, y + h / 2);
+    hbAdd(x, y, w, h, `Btn:${label}`);
+  }
+
+  // ── BUILD 0011: UI描画ヘルパー ───────────────────────────────
+
+  function _roundRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
+
+  function drawGameUIButtons() {
+    ctx.save();
+    ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+    // ⏸ 一時停止ボタン（常時有効）
+    const hov0 = Input.mouse.x >= BTN_PAUSE_X && Input.mouse.x <= BTN_PAUSE_X + BTN_W &&
+                 Input.mouse.y >= BTN_Y        && Input.mouse.y <= BTN_Y        + BTN_H;
+    _roundRect(BTN_PAUSE_X, BTN_Y, BTN_W, BTN_H, 6);
+    ctx.fillStyle = hov0 ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.58)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = hov0 ? '#000' : '#fff';
+    ctx.fillText(_isPaused ? '▶ 再開' : '⏸ 一時停止', BTN_PAUSE_X + BTN_W / 2, BTN_Y + BTN_H / 2);
+
+    // ⌂ タイトルへボタン（BUILD 0017: ポーズ中のみ表示・確認なし）
+    if (_isPaused) {
+      const hov1 = Input.mouse.x >= BTN_RESTART_X && Input.mouse.x <= BTN_RESTART_X + BTN_W &&
+                   Input.mouse.y >= BTN_Y          && Input.mouse.y <= BTN_Y          + BTN_H;
+      _roundRect(BTN_RESTART_X, BTN_Y, BTN_W, BTN_H, 6);
+      ctx.fillStyle = hov1 ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.58)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = hov1 ? '#000' : '#fff';
+      ctx.fillText('⌂ タイトルへ', BTN_RESTART_X + BTN_W / 2, BTN_Y + BTN_H / 2);
+    }
+
+    ctx.restore();
+  }
+
+  function drawPauseOverlay() {
+    if (!_isPaused || _showConfirm) return;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 64px serif';
+    ctx.shadowColor = '#aaaaff'; ctx.shadowBlur = 28;
+    ctx.fillText('⏸ PAUSED', BASE_W / 2, BASE_H / 2);
+    ctx.shadowBlur = 0; ctx.restore();
+  }
+
+  function drawConfirmDialog() {
+    if (!_showConfirm) return;
+    // 背景ブラー代わりの暗転
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    // ダイアログ枠
+    _roundRect(CONFIRM_X, CONFIRM_Y, CONFIRM_W, CONFIRM_H, 10);
+    ctx.fillStyle = '#1a1a2e'; ctx.fill();
+    ctx.strokeStyle = '#5566aa'; ctx.lineWidth = 2; ctx.stroke();
+    // メッセージ
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px sans-serif';
+    ctx.fillText('最初からやり直しますか？', BASE_W / 2, CONFIRM_Y + 40);
+    // はい ボタン
+    const hovYes = Input.mouse.x >= CONFIRM_YES_X && Input.mouse.x <= CONFIRM_YES_X + CONFIRM_YES_W &&
+                   Input.mouse.y >= CONFIRM_BTN_Y  && Input.mouse.y <= CONFIRM_BTN_Y + CONFIRM_YES_H;
+    _roundRect(CONFIRM_YES_X, CONFIRM_BTN_Y, CONFIRM_YES_W, CONFIRM_YES_H, 6);
+    ctx.fillStyle = hovYes ? '#ffffff' : '#334488'; ctx.fill();
+    ctx.strokeStyle = '#6688cc'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = hovYes ? '#000' : '#fff'; ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('はい', CONFIRM_YES_X + CONFIRM_YES_W / 2, CONFIRM_BTN_Y + CONFIRM_YES_H / 2);
+    // キャンセル ボタン
+    const hovNo = Input.mouse.x >= CONFIRM_NO_X && Input.mouse.x <= CONFIRM_NO_X + CONFIRM_NO_W &&
+                  Input.mouse.y >= CONFIRM_BTN_Y && Input.mouse.y <= CONFIRM_BTN_Y + CONFIRM_NO_H;
+    _roundRect(CONFIRM_NO_X, CONFIRM_BTN_Y, CONFIRM_NO_W, CONFIRM_NO_H, 6);
+    ctx.fillStyle = hovNo ? '#ffffff' : '#442233'; ctx.fill();
+    ctx.strokeStyle = '#aa6688'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = hovNo ? '#000' : '#fff';
+    ctx.fillText('キャンセル', CONFIRM_NO_X + CONFIRM_NO_W / 2, CONFIRM_BTN_Y + CONFIRM_NO_H / 2);
+    ctx.restore();
+  }
+
+  // ── メイン描画関数群 ──────────────────────────────────────────
+
+  // NPCポートレート: フォールバック（画像なし時 → カードのみ表示）
+  function drawNpcPortraitFallback(idx) {
+    if (!_state.aiCards[idx] || !_ai[idx].isAlive) return;
+    const cx       = AI_POS[idx].x;
+    const sy       = AI_POS[idx].y - SLOT_H / 2;  // スロット上端
+    // カード: スロット直上 4px gap
+    const cardTopY = sy - NPC_CARD_H - 4;
+    const cX       = cx - NPC_CARD_W / 2;
+    drawCardFront(cX, cardTopY, NPC_CARD_W, NPC_CARD_H, _state.aiCards[idx]);
+    hbAdd(cX, cardTopY, NPC_CARD_W, NPC_CARD_H, `AICard[${idx}]`);
+  }
+
+  // NPCポートレート: 画像 drawImage → フォールバック
+  function drawNpcPortrait(idx) {
+    const p  = _ai[idx];
+    const cx = AI_POS[idx].x;
+    const sy = AI_POS[idx].y - SLOT_H / 2;  // スロット上端
+    if (!p.isAlive) return;
+
+    // ── ポートレート: スロット直上 ───────────────────────────────
+    const portraitY = sy - NPC_IMG_H;          // ポートレート上端
+    // ── カード: ポートレートの上に 4px gap ──────────────────────
+    const cardTopY  = portraitY - NPC_CARD_H - 4;
+    const cardX     = cx - NPC_CARD_W / 2;
+
+    if (!p.imageId) { drawNpcPortraitFallback(idx); return; }
+    const img   = npcImages[p.imageId] && npcImages[p.imageId][p.imageState];
+
+    // BUILD 0012: flip_drunk フェーズ中のフリップアニメーション
+    if (_state.phase === 'flip_drunk') {
+      let isFlipTarget = false;
+      for (let k = 0; k < _state.flipTargets.length; k++) {
+        if (_state.flipTargets[k] === idx) { isFlipTarget = true; break; }
+      }
+      if (isFlipTarget && img && img.complete && img.naturalWidth > 0) {
+        const t = _state.flipTimer;
+        const scaleX = t < NPC_FLIP_HALF_DUR
+          ? Math.max(0, 1 - t / NPC_FLIP_HALF_DUR)
+          : Math.min(1, (t - NPC_FLIP_HALF_DUR) / NPC_FLIP_HALF_DUR);
+        ctx.save();
+        ctx.translate(cx, portraitY + NPC_IMG_H / 2);
+        ctx.scale(scaleX, 1);
+        ctx.drawImage(img, -NPC_IMG_W / 2, -NPC_IMG_H / 2, NPC_IMG_W, NPC_IMG_H);
+        ctx.restore();
+        // カードはフリップしない
+        if (_state.aiCards[idx]) {
+          drawCardFront(cardX, cardTopY, NPC_CARD_W, NPC_CARD_H, _state.aiCards[idx]);
+          hbAdd(cardX, cardTopY, NPC_CARD_W, NPC_CARD_H, `AICard[${idx}]`);
+        }
+        return;
+      }
+    }
+
+    if (img && img.complete && img.naturalWidth > 0) {
+      // ポートレート描画
+      ctx.drawImage(img, cx - NPC_IMG_W / 2, portraitY, NPC_IMG_W, NPC_IMG_H);
+      // カード描画（ポートレートより上・画面内）
+      if (_state.aiCards[idx]) {
+        drawCardFront(cardX, cardTopY, NPC_CARD_W, NPC_CARD_H, _state.aiCards[idx]);
+        hbAdd(cardX, cardTopY, NPC_CARD_W, NPC_CARD_H, `AICard[${idx}]`);
+      }
+    } else {
+      drawNpcPortraitFallback(idx);
+    }
+  }
+
+  function drawAISlot(idx) {
+    const p  = _ai[idx];
+    const cx = AI_POS[idx].x, cy = AI_POS[idx].y;
+    const sx = cx - SLOT_W / 2, sy = cy - SLOT_H / 2;
+    const alive = p.isAlive;
+
+    // NPCポートレート（画像あり: 画像+カード / なし: カードのみ）
+    drawNpcPortrait(idx);
+
+    // スロット背景
+    ctx.fillStyle = alive ? 'rgba(10,10,24,0.84)' : 'rgba(20,10,10,0.70)';
+    ctx.fillRect(sx, sy, SLOT_W, SLOT_H);
+    ctx.strokeStyle = alive ? '#334466' : '#553333';
+    ctx.lineWidth = 1.5; ctx.strokeRect(sx, sy, SLOT_W, SLOT_H);
+
+    // 名前（親バッジ付き）
+    const isOya = (_state.oyaIdx === idx);
+    ctx.fillStyle = alive ? '#bbccdd' : '#665555';
+    ctx.font = 'bold 14px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    ctx.fillText(p.name + (alive ? '' : ' [脱落]') + (isOya ? ' 👑' : ''), cx, sy + 4);
+
+    // パーソナリティラベル（名前の下・小さく）
+    if (alive && p.personality) {
+      ctx.fillStyle = '#556677'; ctx.font = '10px monospace';
+      ctx.fillText(p.personality, cx, sy + 20);
+    }
+
+    if (alive) {
+      drawHpBar(sx + 8, sy + 34, SLOT_W - 16, 10, p.dispHp);
+      ctx.fillStyle = '#8899aa'; ctx.font = '11px monospace';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`酔い ${INITIAL_HP - p.dispHp}/${INITIAL_HP}杯`, cx, sy + 50);
+    }
+
+    // ベット/フォールド表示（betフェーズはプレイヤー決定後・以降フェーズは常時）
+    if (_state.phase === 'bet' || _state.phase === 'show_decisions' ||
+        _state.phase === 'hype' || _state.phase === 'show_result' ||
+        _state.phase === 'highlight_cards' || _state.phase === 'judge' ||
+        _state.phase === 'flip_drunk' ||
+        _state.phase === 'bonus_display' || _state.phase === 'fold_card_reveal') {
+      const showLabel = _state.phase !== 'bet' || _state.betDecisionShown;
+      if (showLabel && alive && _state.aiBet[idx] !== undefined) {
+        const betLabel = _state.aiBet[idx] ? 'BET' : 'FOLD';
+        ctx.fillStyle = _state.aiBet[idx] ? '#ffcc00' : '#888888';
+        ctx.font = 'bold 11px monospace'; ctx.textBaseline = 'bottom';
+        ctx.fillText(betLabel, cx, sy + SLOT_H - 2);
+      }
+    }
+
+    // 交換前カード（交換した場合、現カードの右隣に小さく暗く表示）
+    const prevAC = _state.prevAiCards[idx];
+    if (prevAC && alive) {
+      const hasImg = !!(p.imageId && npcImages[p.imageId] && npcImages[p.imageId][p.imageState]);
+      const cardTopY = hasImg ? (sy - NPC_IMG_H - NPC_CARD_H - 4) : (sy - NPC_CARD_H - 4);
+      const cardX    = cx - NPC_CARD_W / 2;
+      const pw = Math.round(NPC_CARD_W * 0.70), ph = Math.round(NPC_CARD_H * 0.70);
+      const px = cardX + NPC_CARD_W + 3, py = cardTopY + (NPC_CARD_H - ph);
+      ctx.save();
+      ctx.globalAlpha = 0.50;
+      drawCardFront(px, py, pw, ph, prevAC);
+      ctx.fillStyle = 'rgba(0,0,0,0.50)';
+      ctx.fillRect(px, py, pw, ph);
+      ctx.restore();
+    }
+
+    hbAdd(sx, sy, SLOT_W, SLOT_H, `AI[${idx}]:${p.name}`);
+  }
+
+  // ── BUILD 0017: 全NPC吹き出し（speechActiveText ローテーションベース）──
+  function drawAllSpeechBubbles() {
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive || !_state.speechActiveText[i]) continue;
+      const cx         = AI_POS[i].x;
+      const sy         = AI_POS[i].y - SLOT_H / 2;  // スロット上端
+      const portraitTopY = sy - NPC_IMG_H;           // ポートレート上端
+      drawSpeechBubble(cx, portraitTopY, _state.speechActiveText[i]);
+    }
+  }
+
+  function drawTable() {
+    // 影
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(TBL_CX+6, TBL_CY+8, TBL_RX, TBL_RY, 0, 0, Math.PI*2); ctx.fill();
+    // フェルト
+    ctx.fillStyle = _tableGrad;
+    ctx.beginPath(); ctx.ellipse(TBL_CX, TBL_CY, TBL_RX, TBL_RY, 0, 0, Math.PI*2); ctx.fill();
+    // 縁
+    ctx.strokeStyle = '#8B6914'; ctx.lineWidth = 7;
+    ctx.beginPath(); ctx.ellipse(TBL_CX, TBL_CY, TBL_RX, TBL_RY, 0, 0, Math.PI*2); ctx.stroke();
+
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const p = _state.phase;
+
+    if (p === 'exchange') {
+      ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = 'bold 30px monospace';
+      ctx.fillText(`${Math.ceil(_state.roundTimer)}秒`, TBL_CX, TBL_CY - 22);
+      ctx.font = 'bold 20px monospace';
+      ctx.fillText('カード交換フェーズ', TBL_CX, TBL_CY + 18);
+    } else if (p === 'bet') {
+      ctx.fillStyle = '#ffee44'; ctx.font = 'bold 30px monospace';
+      ctx.fillText(`${Math.ceil(_state.roundTimer)}秒`, TBL_CX, TBL_CY - 28);
+      ctx.font = 'bold 18px monospace'; ctx.fillStyle = 'rgba(255,255,255,0.88)';
+      ctx.fillText('ベットフェーズ', TBL_CX, TBL_CY);
+      ctx.font = '16px monospace'; ctx.fillStyle = '#aaccaa';
+      ctx.fillText('ショット数: ?', TBL_CX, TBL_CY + 24);
+    } else if (p === 'show_decisions' || p === 'hype' || p === 'card_reveal' ||
+               p === 'highlight_cards' || p === 'judge' || p === 'flip_drunk' ||
+               p === 'show_result' || p === 'bonus_display' ||
+               p === 'fold_card_reveal' || p === 'next') {
+      // (D) hype中: ショットグラステキストをスケールアップ
+      let glassScale = 1;
+      if (p === 'hype') {
+        const gT = _state.hypeTimer - HYPE_FLASH_AT;
+        if (gT >= 0 && gT < HYPE_GLASS_DUR * 2) {
+          glassScale = gT < HYPE_GLASS_DUR
+            ? 1 + 0.3 * (gT / HYPE_GLASS_DUR)
+            : 1 + 0.3 * (1 - (gT - HYPE_GLASS_DUR) / HYPE_GLASS_DUR);
+        }
+      }
+      ctx.save();
+      ctx.translate(TBL_CX, TBL_CY);
+      ctx.scale(glassScale, glassScale);
+      ctx.fillStyle = 'rgba(255,255,255,0.88)'; ctx.font = 'bold 22px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('🥃 ' + _state.shotCount + ' ショット', 0, 0);
+      ctx.restore();
+    } else {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '18px monospace';
+      ctx.fillText('カード配布中...', TBL_CX, TBL_CY);
+    }
+
+    hbAdd(TBL_CX - TBL_RX, TBL_CY - TBL_RY, TBL_RX * 2, TBL_RY * 2, 'Table');
+  }
+
+  function drawPlayerArea() {
+    const alive = _human.isAlive;
+    ctx.fillStyle = alive ? 'rgba(0,16,36,0.90)' : 'rgba(20,0,0,0.80)';
+    ctx.fillRect(PLR_X, PLR_Y, PLR_W, PLR_H);
+    ctx.strokeStyle = alive ? '#336699' : '#663333';
+    ctx.lineWidth = 2; ctx.strokeRect(PLR_X, PLR_Y, PLR_W, PLR_H);
+
+    const isPlayerOya = (_state.oyaIdx === -1);
+    ctx.fillStyle = alive ? '#66aaff' : '#aa6666';
+    ctx.font = 'bold 16px monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText(_human.name + (alive ? '' : ' [脱落]') + (isPlayerOya ? ' 👑' : ''), PLR_X + 12, PLR_Y + 10);
+
+    if (alive) {
+      drawHpBar(PLR_X + 12, PLR_Y + 34, 190, 13, _human.dispHp);
+      ctx.fillStyle = '#99ccee'; ctx.font = '12px monospace'; ctx.textBaseline = 'top';
+      ctx.fillText(`酔い ${INITIAL_HP - _human.dispHp}/${INITIAL_HP}杯`, PLR_X + 12, PLR_Y + 54);
+    }
+
+    // カード（カード開示後フェーズでは表面を表示）
+    if (_state.playerCard && alive) {
+      const cX = PLR_X + 218, cY = PLR_Y + 12;
+      const p = _state.phase;
+      const revealedPhases = ['highlight_cards','judge','flip_drunk','show_result','bonus_display','next'];
+      const isRevealed = revealedPhases.includes(p)
+        || (p === 'card_reveal' && _state.revealTimer >= SHOT_FLASH_DURATION);
+      if (isRevealed) {
+        drawCardFront(cX, cY, 58, 82, _state.playerCard);
+      } else {
+        drawCardBack(cX, cY, 58, 82);
+      }
+      hbAdd(cX, cY, 58, 82, 'PlayerCard');
+      // 交換前カード（右隣に小さく暗く）
+      if (_state.prevPlayerCard) {
+        const pw = 40, ph = 57;
+        ctx.save();
+        ctx.globalAlpha = 0.50;
+        drawCardFront(cX + 58 + 3, cY + (82 - ph), pw, ph, _state.prevPlayerCard);
+        ctx.fillStyle = 'rgba(0,0,0,0.50)';
+        ctx.fillRect(cX + 58 + 3, cY + (82 - ph), pw, ph);
+        ctx.restore();
+      }
+    }
+
+    // 親の特殊能力ヒント（ベットフェーズ中のみ）
+    if (isPlayerOya && alive && _state.phase === 'bet' && _state.playerCard) {
+      const avg = _calcCardAverage();
+      const isAbove = _state.playerCard.value >= avg;
+      const hintText = `◆ 親の特権: 場の平均より${isAbove ? '【高い】' : '【低い】'}`;
+      ctx.fillStyle = isAbove ? '#ffee44' : '#88aaff';
+      ctx.font = 'bold 13px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.shadowColor = isAbove ? '#ff8800' : '#4466ff'; ctx.shadowBlur = 10;
+      ctx.fillText(hintText, PLR_X + PLR_W / 2, PLR_Y + PLR_H - 40);
+      ctx.shadowBlur = 0;
+    }
+
+    const p = _state.phase;
+
+    // ─── 交換フェーズ ───────────────────────────────────────────
+    if (p === 'exchange' && alive) {
+      if (_state.playerSwapped === null) {
+        const swapHl = _state.playerSwappedProv === true;
+        const keepHl = _state.playerSwappedProv === false;
+        drawInlineButton(_actBtns[0].x, ACT_BY, ACT_BW, ACT_BH, '交換',
+          swapHl ? '#1a3a6a' : '#1a2040', swapHl ? '#88ccff' : '#dddddd', swapHl ? '#5599ee' : '#3355aa');
+        drawInlineButton(_actBtns[1].x, ACT_BY, ACT_BW, ACT_BH, 'キープ',
+          keepHl ? '#1a3a6a' : '#1a2040', keepHl ? '#88ccff' : '#dddddd', keepHl ? '#5599ee' : '#3355aa');
+        if (_state.playerSwappedProv !== null) {
+          drawInlineButton(_actBtns[2].x, BET_DECIDE_BY, BET_DECIDE_BW, BET_DECIDE_BH, '決定！', '#002800', '#00ff88', '#00aa44');
+        }
+      } else {
+        drawInlineButton(_actBtns[2].x, BET_DECIDE_BY, BET_DECIDE_BW, BET_DECIDE_BH, '次へ', '#1a3030', '#00ff88', '#00aa44');
+        const dText = _state.playerSwapped ? 'カード交換！' : 'そのまま';
+        ctx.fillStyle = '#ffff99'; ctx.font = 'bold 14px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('あなた: ' + dText, PLR_X + PLR_W / 2, PLR_Y + PLR_H - 22);
+      }
+    }
+
+    // ─── ベットフェーズ ──────────────────────────────────────────
+    if (p === 'bet' && alive) {
+      if (_state.playerBet === null) {
+        // BET ボタン（仮選択中は明るく）
+        const betHl  = _state.playerBetProv === true;
+        const foldHl = _state.playerBetProv === false;
+        drawInlineButton(BET_BX,  BET_BY_C, BET_BW, BET_BH, 'ベット',
+          betHl  ? '#1a4a6a' : '#102030', '#33aaff', betHl  ? '#66ccff' : '#2288cc');
+        drawInlineButton(FOLD_BX, BET_BY_C, BET_BW, BET_BH, 'フォールド',
+          foldHl ? '#5a2010' : '#201010', '#ff6644', foldHl ? '#ff9977' : '#cc3322');
+        // 決定ボタン（仮選択中のみ）
+        if (_state.playerBetProv !== null) {
+          drawInlineButton(BET_DECIDE_BX + 160, BET_DECIDE_BY, BET_DECIDE_BW, BET_DECIDE_BH,
+            '決定！', '#002800', '#00ff88', '#00aa44');
+        }
+        // タイムアップ案内
+        ctx.fillStyle = '#aaaaaa'; ctx.font = '13px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        const timeupText = _state.playerBetProv === true  ? 'タイムアップ → ベット' :
+                           _state.playerBetProv === false ? 'タイムアップ → フォールド' :
+                                                            'タイムアップ → フォールド';
+        ctx.fillText(timeupText, PLR_X + PLR_W / 2, PLR_Y + PLR_H - 14);
+      } else {
+        const decided = _state.playerBet ? 'ベット！' : 'フォールド';
+        const col     = _state.playerBet ? '#33aaff' : '#ff6644';
+        ctx.fillStyle = col; ctx.font = 'bold 20px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('あなた: ' + decided, PLR_X + PLR_W / 2, PLR_Y + PLR_H / 2 + 10);
+        ctx.fillStyle = '#777777'; ctx.font = '14px monospace';
+        ctx.fillText('AI の結果待ち...', PLR_X + PLR_W / 2, PLR_Y + PLR_H - 16);
+      }
+    }
+
+    hbAdd(PLR_X, PLR_Y, PLR_W, PLR_H, 'PlayerArea');
+  }
+
+  function drawExchangeDecisions() {
+    if (_state.phase !== 'exchange') return;
+    const FX = 0, FY = PLR_Y, FW = 282, FH = PLR_H;
+    ctx.fillStyle = 'rgba(0,0,0,0.50)'; ctx.fillRect(FX, FY, FW, FH);
+    ctx.strokeStyle = '#336699'; ctx.lineWidth = 1; ctx.strokeRect(FX, FY, FW, FH);
+    ctx.fillStyle = '#99ccee'; ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('交換フィード:', FX + 8, FY + 8);
+    for (let i = 0; i < AI_COUNT; i++) {
+      const dec = _state.aiDecision[i] || _ai[i].name + ': 検討中...';
+      ctx.fillStyle = _state.aiSwapped[i] ? '#ffaa88' : '#88ffaa';
+      ctx.fillText(dec, FX + 8, FY + 28 + i * 20);
+    }
+  }
+
+  function drawShowResultOverlay() {
+    if (_state.phase !== 'show_result') return;
+
+    // 半透明オーバーレイ
+    ctx.fillStyle = 'rgba(0,0,0,0.52)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    _drawBettersBrightLayer();
+
+    if (_state.elimTimer > 0) {
+      // 脱落メッセージ
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 24;
+      ctx.fillStyle = '#ff4444'; ctx.font = 'bold 58px serif';
+      ctx.fillText(_state.elimNames.join('・') + ' が脱落！', BASE_W / 2, BASE_H / 2);
+      ctx.shadowBlur = 0; ctx.restore();
+    } else {
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+      // ── フォールド組（控えめ・常時表示）────────────────────────
+      if (_state.foldText) {
+        const lines = _state.foldText.trimEnd().split('\n');
+        ctx.fillStyle = '#bbbbbb'; ctx.font = '22px sans-serif';
+        const lineH = 28;
+        const blockH = lines.length * lineH;
+        // ベット結果の上に配置（ベット結果がない場合は中央）
+        const hasResolve = !!_state.resolveText;
+        const foldBaseY = hasResolve
+          ? BASE_H / 2 - 60 - blockH
+          : BASE_H / 2 - blockH / 2;
+        for (let i = 0; i < lines.length; i++) {
+          ctx.fillText(lines[i], BASE_W / 2, foldBaseY + i * lineH);
+        }
+      }
+
+      // ── ベット負け組（フラッシュ）────────────────────────────
+      if (_state.resolveText && _state.resolveFlashOn) {
+        ctx.shadowColor = '#ff4400'; ctx.shadowBlur = 22;
+        ctx.fillStyle = '#ff5533'; ctx.font = 'bold 46px serif';
+        ctx.fillText(_state.resolveText, BASE_W / 2, BASE_H / 2 + 10);
+        ctx.shadowBlur = 0;
+      }
+
+      ctx.restore();
+    }
+  }
+
+  function drawCardRevealOverlay() {
+    if (_state.phase !== 'card_reveal' && _state.phase !== 'fold_card_reveal') return;
+    const t   = _state.revealTimer;
+    const FLIP = SHOT_FLASH_DURATION;  // 0.5秒でフリップ
+    const SHOW = REVEAL_SHOW_TIME;     // 1.5秒表示
+
+    // 半透明背景
+    ctx.fillStyle = 'rgba(0,0,0,0.72)'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+    if (_state.phase === 'card_reveal') _drawBettersBrightLayer();
+
+    // テキスト「あなたのカードは…」
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.font = 'bold 36px serif';
+    ctx.shadowColor = '#ffffff'; ctx.shadowBlur = 12;
+    ctx.fillText('あなたのカードは…', BASE_W / 2, BASE_H / 2 - 90);
+    ctx.shadowBlur = 0; ctx.restore();
+
+    // カードフリップアニメーション
+    const card = _state.playerCard;
+    if (card) {
+      const CW = 128, CH = 192;
+      const cx = BASE_W / 2, cy = BASE_H / 2 + 20;
+
+      if (t < FLIP) {
+        // フリップ前半: 裏面 → 横に縮む (scaleX: 1→0)
+        const scaleX = 1 - (t / FLIP);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(scaleX, 1);
+        drawCardBack(-CW / 2, -CH / 2, CW, CH);
+        ctx.restore();
+      } else {
+        // フリップ後半以降: 表面 (scaleX: 0→1 then 1)
+        const scaleX = Math.min(1, (t - FLIP) / (FLIP * 0.5));
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.scale(scaleX, 1);
+        drawCardFront(-CW / 2, -CH / 2, CW, CH, card);
+        ctx.restore();
+
+        // カード名テキスト（スケールが1に近づいてから表示）
+        if (scaleX > 0.8) {
+          const isJoker = card.suit === 'j';
+          const sym = isJoker ? '★' : ({ s: '♠', h: '♥', d: '♦', c: '♣' }[card.suit] || '?');
+          const val = isJoker ? 'JOKER' : (card.value <= 10 ? String(card.value) : ['J','Q','K','A'][card.value - 11]);
+          const isRed = card.suit === 'h' || card.suit === 'd';
+          ctx.save();
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = isJoker ? '#aa00cc' : (isRed ? '#ff4444' : '#222222');
+          ctx.font = 'bold 48px serif';
+          ctx.shadowColor = isJoker ? '#dd88ff' : (isRed ? '#ff8888' : '#aaaaaa'); ctx.shadowBlur = 10;
+          ctx.fillText(val + ' ' + sym, BASE_W / 2, BASE_H / 2 + 140);
+          ctx.shadowBlur = 0; ctx.restore();
+        }
+      }
+    }
+  }
+
+
+
+  // ── ベットキャラを暗転の上に明るく再描画するヘルパー ──────────────
+  function _drawBettersBrightLayer() {
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiBet[i]) drawAISlot(i);
+    }
+    if (_human.isAlive && _state.playerBet) drawPlayerArea();
+  }
+
+  // ── BUILD 0005: 選択結果表示オーバーレイ ─────────────────────────
+  function drawShowDecisionsOverlay() {
+    if (_state.phase !== 'show_decisions') return;
+
+    // 全体を暗転
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+    // ベットしたAIスロットを明るく再描画（暗転の上に上書き）
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (_ai[i].isAlive && _state.aiBet[i]) drawAISlot(i);
+    }
+    // ベットしたプレイヤーエリアも再描画
+    if (_human.isAlive && _state.playerBet) drawPlayerArea();
+
+    // タイトル「勝負！」
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = 'bold 52px serif';
+    ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 28;
+    ctx.fillStyle = '#ffdd44';
+    ctx.fillText('勝負！', BASE_W / 2, BASE_H / 2 - 70);
+    ctx.shadowBlur = 0; ctx.restore();
+
+    // 各AIのベット/フォールドラベル（スロット下）
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive) continue;
+      const cx = AI_POS[i].x, cy = AI_POS[i].y;
+      const label = _state.aiBet[i] ? 'ベット' : 'フォールド';
+      const col   = _state.aiBet[i] ? '#44ff88' : '#888888';
+      const tw = 84, th = 26;
+      ctx.fillStyle = 'rgba(0,0,0,0.72)';
+      ctx.fillRect(cx - tw / 2, cy + SLOT_H / 2 + 4, tw, th);
+      ctx.fillStyle = col; ctx.font = 'bold 14px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(label, cx, cy + SLOT_H / 2 + 4 + th / 2);
+    }
+
+    // プレイヤーのラベル（大きく目立つ表示）
+    if (_human.isAlive && _state.playerBet !== null) {
+      const isBet = _state.playerBet;
+      const label = isBet ? 'BET' : 'フォールド';
+      const col   = isBet ? '#44ff88' : '#888888';
+      const glowCol = isBet ? '#00ff66' : '#555555';
+      const px = PLR_X + PLR_W / 2;
+      const py = PLR_Y - 30;
+      // 背景バナー
+      const tw = isBet ? 130 : 150, th = isBet ? 52 : 36;
+      ctx.fillStyle = 'rgba(0,0,0,0.80)';
+      ctx.fillRect(px - tw / 2, py - th / 2, tw, th);
+      // テキスト
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = col;
+      ctx.font = isBet ? 'bold 38px serif' : 'bold 20px monospace';
+      ctx.shadowColor = glowCol; ctx.shadowBlur = isBet ? 24 : 8;
+      ctx.fillText(label, px, py);
+      ctx.shadowBlur = 0; ctx.restore();
+      // 「あなた」サブラベル
+      ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+      ctx.fillText(_human.name, px, py + th / 2 + 2);
+    }
+  }
+
+  // ── BUILD 0005: 盛り上げ演出オーバーレイ ─────────────────────────
+  function drawHypeOverlay() {
+    if (_state.phase !== 'hype') return;
+    const t = _state.hypeTimer;
+
+    ctx.fillStyle = 'rgba(0,0,0,0.50)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    _drawBettersBrightLayer();
+
+    // (E) 全NPC感嘆符（暗転直後・テキスト類より下のレイヤー）
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive || !_state.hypeExclaim[i]) continue;
+      const cx           = AI_POS[i].x;
+      const sy           = AI_POS[i].y - SLOT_H / 2;
+      const portraitTopY = sy - NPC_IMG_H;
+      drawSpeechBubble(cx, portraitTopY, _state.hypeExclaim[i]);
+    }
+
+    // (A) 「ショーダウン」スケールイン (0→HYPE_CD_START秒でscale 1→1.5)
+    const scaleT    = Math.min(1, t / HYPE_CD_START);
+    const textScale = 1.0 + 0.5 * scaleT;
+    ctx.save();
+    ctx.translate(BASE_W / 2, BASE_H / 2 - 90);
+    ctx.scale(textScale, textScale);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.88)'; ctx.font = 'bold 40px serif';
+    ctx.shadowColor = '#ffaa00'; ctx.shadowBlur = 22;
+    ctx.fillText('ショーダウン', 0, 0);
+    ctx.shadowBlur = 0; ctx.restore();
+
+    // (B) カウントダウン 3→2→1
+    const cdT = t - HYPE_CD_START;
+    if (cdT >= 0 && cdT < HYPE_CD_STEP * 3) {
+      const cdIdx   = Math.min(2, Math.floor(cdT / HYPE_CD_STEP));
+      const cdNum   = 3 - cdIdx;
+      const cdInner = (cdT % HYPE_CD_STEP) / HYPE_CD_STEP;
+      const colors  = ['#ffffff', '#ffee00', '#ff4400'];
+      const alpha   = Math.max(0, 1 - cdInner * 1.5);
+      const scl     = 1.0 + 0.3 * (1 - cdInner);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(BASE_W / 2, BASE_H / 2 + 30);
+      ctx.scale(scl, scl);
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = colors[cdIdx]; ctx.font = 'bold 110px serif';
+      ctx.shadowColor = colors[cdIdx]; ctx.shadowBlur = 36;
+      ctx.fillText(String(cdNum), 0, 0);
+      ctx.shadowBlur = 0; ctx.restore();
+    }
+
+    // (C) フラッシュ（最前面）
+    if (_state.hypeFlashAlpha > 0) {
+      ctx.save();
+      ctx.globalAlpha = _state.hypeFlashAlpha;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, BASE_W, BASE_H);
+      ctx.restore();
+    }
+  }
+
+  // ── BUILD 0005/0012: リアクションログパネル ─────────────────────
+  function drawReactionLogPanel() {
+    // BUILD 0012: プレイヤーUIエリアの右側に配置
+    const PW = 282, PX = BASE_W - PW, PY = PLR_Y, PH = PLR_H;
+    ctx.fillStyle = 'rgba(0,0,0,0.50)';
+    ctx.fillRect(PX, PY, PW, PH);
+    ctx.strokeStyle = '#334455'; ctx.lineWidth = 1;
+    ctx.strokeRect(PX, PY, PW, PH);
+
+    ctx.fillStyle = '#55aacc'; ctx.font = 'bold 12px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('REACTION LOG', PX + 8, PY + 5);
+    ctx.fillStyle = '#334455'; ctx.fillRect(PX + 1, PY + 20, PW - 2, 1);
+
+    const entryH = 20;
+    const maxShow = Math.floor((PH - 26) / entryH);
+    const start   = Math.max(0, _reactionLog.length - maxShow);
+    for (let i = start; i < _reactionLog.length; i++) {
+      const e   = _reactionLog[i];
+      const ey  = PY + 24 + (i - start) * entryH;
+      const hl  = e.age < REACTION_LOG_FADE;
+      ctx.fillStyle = hl ? '#ffff55' : '#99bbcc';
+      ctx.font      = hl ? 'bold 12px monospace' : '12px monospace';
+      const txt = '[' + e.name + '] ' + e.text;
+      // 長い場合は切り詰め
+      const maxW = PW - 16;
+      ctx.save();
+      ctx.rect(PX + 8, ey, maxW, entryH);
+      ctx.clip();
+      ctx.fillText(txt, PX + 8, ey);
+      ctx.restore();
+    }
+  }
+
+  // ── BUILD 0012: ハイライトカードオーバーレイ ─────────────────────
+  function drawHighlightCardsOverlay() {
+    if (_state.phase !== 'highlight_cards') return;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    _drawBettersBrightLayer();
+
+    // AI カードのハイライト / グレーアウト
+    for (let i = 0; i < AI_COUNT; i++) {
+      if (!_ai[i].isAlive || !_state.aiCards[i]) continue;
+      const cx = AI_POS[i].x;
+      const sy = AI_POS[i].y - SLOT_H / 2;
+      const pY = sy - NPC_IMG_H;
+      const cY = pY - NPC_CARD_H - 4;
+      const cX = cx - NPC_CARD_W / 2;
+      const cW = NPC_CARD_W, cH = NPC_CARD_H;
+
+      if (_state.aiBet[i]) {
+        // ベット者: 1.2倍スケール + 黄色ボーダー
+        ctx.save();
+        ctx.translate(cx, cY + cH / 2);
+        ctx.scale(1.2, 1.2);
+        drawCardFront(-cW / 2, -cH / 2, cW, cH, _state.aiCards[i]);
+        ctx.strokeStyle = '#ffff44'; ctx.lineWidth = 3;
+        ctx.shadowColor = '#ffff44'; ctx.shadowBlur = 12;
+        ctx.strokeRect(-cW / 2, -cH / 2, cW, cH);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      } else {
+        // フォールド者: グレーアウト
+        ctx.fillStyle = 'rgba(60,60,60,0.72)';
+        ctx.fillRect(cX, cY, cW, cH);
+      }
+    }
+
+    // プレイヤーカードのハイライト / グレーアウト
+    if (_state.playerCard && _human.isAlive) {
+      const pcX = PLR_X + 218, pcY = PLR_Y + 12, pcW = 58, pcH = 82;
+      if (_state.playerBet) {
+        ctx.save();
+        ctx.translate(pcX + pcW / 2, pcY + pcH / 2);
+        ctx.scale(1.2, 1.2);
+        drawCardFront(-pcW / 2, -pcH / 2, pcW, pcH, _state.playerCard);
+        ctx.strokeStyle = '#ffff44'; ctx.lineWidth = 3;
+        ctx.shadowColor = '#ffff44'; ctx.shadowBlur = 12;
+        ctx.strokeRect(-pcW / 2, -pcH / 2, pcW, pcH);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      } else if (_state.playerBet === false) {
+        ctx.fillStyle = 'rgba(60,60,60,0.72)';
+        ctx.fillRect(pcX, pcY, pcW, pcH);
+      }
+    }
+  }
+
+  // ── BUILD 0012: 判定オーバーレイ ─────────────────────────────────
+  function drawJudgeOverlay() {
+    if (_state.phase !== 'judge') return;
+    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+    _drawBettersBrightLayer();
+
+    // 負け者カードを赤くハイライト
+    for (let j = 0; j < _state.judgeLoserIndices.length; j++) {
+      const who = _state.judgeLoserIndices[j];
+      if (who === -1) {
+        // プレイヤー
+        if (_human.isAlive && _state.playerCard) {
+          const pcX = PLR_X + 218, pcY = PLR_Y + 12, pcW = 58, pcH = 82;
+          ctx.save();
+          ctx.fillStyle = 'rgba(255,0,0,0.28)'; ctx.fillRect(pcX, pcY, pcW, pcH);
+          ctx.strokeStyle = '#ff2222'; ctx.lineWidth = 4;
+          ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 16;
+          ctx.strokeRect(pcX, pcY, pcW, pcH);
+          ctx.shadowBlur = 0; ctx.restore();
+        }
+      } else {
+        const i = who;
+        if (_ai[i].isAlive && _state.aiCards[i]) {
+          const cx = AI_POS[i].x;
+          const sy = AI_POS[i].y - SLOT_H / 2;
+          const pY = sy - NPC_IMG_H;
+          const cY = pY - NPC_CARD_H - 4;
+          const cX = cx - NPC_CARD_W / 2;
+          ctx.save();
+          ctx.fillStyle = 'rgba(255,0,0,0.28)';
+          ctx.fillRect(cX, cY, NPC_CARD_W, NPC_CARD_H);
+          ctx.strokeStyle = '#ff2222'; ctx.lineWidth = 4;
+          ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 16;
+          ctx.strokeRect(cX, cY, NPC_CARD_W, NPC_CARD_H);
+          ctx.shadowBlur = 0; ctx.restore();
+        }
+      }
+    }
+
+    // resolveText は show_result フェーズで表示するためここでは省略
+  }
+
+  // ── BUILD 0019: ボーナス画像オーバーレイ ────────────────────────
+  function drawBonusDisplayOverlay() {
+    if (_state.phase !== 'bonus_display') return;
+    if (_state.bonusQueue.length === 0) return;
+
+    const entry    = _state.bonusQueue[0];
+    const img      = npcBonusImages[entry.imageId];
+    // BUILD 0020: タイマーが BONUS_IMG_DURATION より大きい間はテキスト表示フェーズ
+    const showText = _state.bonusDisplayTimer > BONUS_IMG_DURATION;
+
+    // (A) 背景オーバーレイ
+    ctx.fillStyle = 'rgba(0,0,0,0.85)';
+    ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+    // (B) ボーナス画像（縦720px 基準・アスペクト比維持・中央配置）
+    if (img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+      const scale = BASE_H / img.naturalHeight;
+      const w = img.naturalWidth * scale;
+      const x = (BASE_W - w) / 2;
+      ctx.drawImage(img, x, 0, w, BASE_H);
+    }
+
+    // (C) 脱落テキスト（テキスト表示フェーズのみ：画像と同時）
+    // BUILD 0023: 複数脱落時も1人ずつ個別名を表示
+    if (showText) {
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.shadowColor = '#ff0000'; ctx.shadowBlur = 24;
+      ctx.fillStyle = '#ff4444'; ctx.font = 'bold 58px serif';
+      ctx.fillText(entry.name + ' が脱落！', BASE_W / 2, BASE_H / 2);
+      ctx.shadowBlur = 0; ctx.restore();
+    } else {
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    }
+  }
+
+  // ── BUILD 0013: つぎへスキップボタン ────────────────────────────
+  function drawSkipButton() {
+    if (!_isSkipPhase() || _isPaused) return;
+    const hov = Input.mouse.x >= SKIP_BX && Input.mouse.x <= SKIP_BX + SKIP_BW &&
+                Input.mouse.y >= SKIP_BY && Input.mouse.y <= SKIP_BY + SKIP_BH;
+    ctx.save();
+    _roundRect(SKIP_BX, SKIP_BY, SKIP_BW, SKIP_BH, 8);
+    ctx.fillStyle = hov ? 'rgba(255,255,255,1.0)' : 'rgba(255,255,255,0.85)';
+    ctx.fill();
+    ctx.fillStyle = '#000000'; ctx.font = 'bold 15px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('つぎへ ▶', SKIP_BX + SKIP_BW / 2, SKIP_BY + SKIP_BH / 2);
+    ctx.restore();
+    hbAdd(SKIP_BX, SKIP_BY, SKIP_BW, SKIP_BH, 'SkipBtn');
+  }
+
+  // ── デバッグレンダリング（GameScene 専用） ───────────────────
+
+  function debugRender() {
+    const base = 140;
+    ctx.fillStyle = 'rgba(0,0,0,0.70)'; ctx.fillRect(8, base, 310, 20 + (AI_COUNT + 1) * 17 + 20);
+    ctx.fillStyle = '#00ff88'; ctx.font = '12px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    const timer = _state.roundTimer.toFixed(1);
+    ctx.fillText(`Phase: ${_state.phase}  Timer: ${timer}s`, 16, base + 8);
+    const pc = _state.playerCard;
+    const pBetLabel = _state.playerBet === null ? '-' : (_state.playerBet ? 'BET' : 'FOLD');
+    ctx.fillText(`あなた  HP:${_human.hp}  Card:${pc ? pc.value+pc.suit : '-'}  Bet:${pBetLabel}`, 16, base + 26);
+    for (let i = 0; i < AI_COUNT; i++) {
+      const c = _state.aiCards[i];
+      const bStr = _state.aiBet[i] ? 'BET' : 'FOLD';
+      ctx.fillText(`${_ai[i].name}(${_ai[i].personality})  bluff:${_ai[i].bluffRate}  HP:${_ai[i].hp}  Card:${c ? c.value+c.suit : '-'}  ${bStr}`, 16, base + 44 + i * 17);
+    }
+  }
+
+  // ── IIFE 返り値 ───────────────────────────────────────────────
+
+  return {
+    onEnter() {
+      _human.name = _playerNickname || 'プレイヤー';
+      _tableGrad = ctx.createRadialGradient(TBL_CX - 60, TBL_CY - 40, 20, TBL_CX, TBL_CY, TBL_RX);
+      _tableGrad.addColorStop(0, '#2e6e2e'); _tableGrad.addColorStop(1, '#193619');
+      _isPaused = false; _showConfirm = false;
+      _startRound();
+    },
+
+    dbgDealJoker() {
+      if (_human.isAlive && _state.playerCard !== undefined) {
+        _state.playerCard = { value: 99, suit: 'j' };
+        console.log('[DBG] Joker dealt to player');
+      }
+    },
+
+    update(dt) {
+      if (isHowToPlayOpen) return;  // BUILD 0018: モーダル中はゲーム操作を無効化
+
+      // ── BUILD 0011: ボタン・ポーズ・確認ダイアログ処理 ──────────
+      if (Input.isPressed('Escape')) {
+        if (_showConfirm) { _showConfirm = false; _isPaused = true; }
+        else              { _isPaused = !_isPaused; }
+      }
+
+      if (Input.mouse.clicked) {
+        if (_showConfirm) {
+          // 確認ダイアログ中のクリック
+          if (Input.mouse.x >= CONFIRM_YES_X && Input.mouse.x <= CONFIRM_YES_X + CONFIRM_YES_W &&
+              Input.mouse.y >= CONFIRM_BTN_Y  && Input.mouse.y <= CONFIRM_BTN_Y + CONFIRM_YES_H) {
+            // はい → やり直し
+            _showConfirm = false; _isPaused = false;
+            _startRound();
+            return;
+          }
+          if (Input.mouse.x >= CONFIRM_NO_X && Input.mouse.x <= CONFIRM_NO_X + CONFIRM_NO_W &&
+              Input.mouse.y >= CONFIRM_BTN_Y && Input.mouse.y <= CONFIRM_BTN_Y + CONFIRM_NO_H) {
+            // キャンセル
+            _showConfirm = false; _isPaused = true;
+          }
+          return; // ダイアログ中は他の入力を無視
+        }
+        // 一時停止ボタン
+        if (Input.mouse.x >= BTN_PAUSE_X   && Input.mouse.x <= BTN_PAUSE_X   + BTN_W &&
+            Input.mouse.y >= BTN_Y          && Input.mouse.y <= BTN_Y          + BTN_H) {
+          _isPaused = !_isPaused;
+        }
+        // タイトルへボタン（ポーズ中のみ有効・BUILD 0017: 確認なし即タイトル遷移）
+        if (_isPaused &&
+            Input.mouse.x >= BTN_RESTART_X && Input.mouse.x <= BTN_RESTART_X + BTN_W &&
+            Input.mouse.y >= BTN_Y         && Input.mouse.y <= BTN_Y         + BTN_H) {
+          _isPaused = false;
+          SceneManager.change('Title');
+        }
+        // BUILD 0013: つぎへスキップボタン（リザルト演出中のみ・非ポーズ時）
+        if (!_isPaused && _isSkipPhase() &&
+            Input.mouse.x >= SKIP_BX && Input.mouse.x <= SKIP_BX + SKIP_BW &&
+            Input.mouse.y >= SKIP_BY && Input.mouse.y <= SKIP_BY + SKIP_BH) {
+          _skipPhase();
+        }
+      }
+
+      // ポーズ中は以降の処理をスキップ
+      if (_isPaused) return;
+
+      // リアクションログ年齢更新（全フェーズ共通）
+      for (let j = 0; j < _reactionLog.length; j++) _reactionLog[j].age += dt;
+
+      // BUILD 0015: セリフタイマー減算（全フェーズ共通）
+      for (let i = 0; i < AI_COUNT; i++) {
+        if (_state.aiSpeech1T[i] > 0) _state.aiSpeech1T[i] = Math.max(0, _state.aiSpeech1T[i] - dt);
+        if (_state.aiSpeech2T[i] > 0) _state.aiSpeech2T[i] = Math.max(0, _state.aiSpeech2T[i] - dt);
+      }
+      // BUILD 0017: 吹き出しローテーションタイマー
+      _state.speechRotationTimer += dt;
+      if (_state.speechRotationTimer >= SPEECH_ROTATION_INTERVAL) {
+        _state.speechRotationTimer = 0;
+        _rotateSpeech();
+      }
+
+      // ── deal フェーズ ─────────────────────────────────────────
+      if (_state.phase === 'deal') {
+        _state.phase      = 'exchange';
+        _state.roundTimer = EXCHANGE_TIMER;
+        return;
+      }
+
+      // ── exchange フェーズ ─────────────────────────────────────
+      if (_state.phase === 'exchange') {
+        _state.roundTimer -= dt;
+        _state.reactionLogIntervalT -= dt;
+        if (_state.reactionLogIntervalT <= 0) {
+          _state.reactionLogIntervalT = REACTION_INTERVAL;
+          _genAllReactions('interval');
+        }
+
+        if (_state.playerSwapped === null) {
+          if (Input.mouse.clicked) {
+            if (_inRect(_actBtns[0].x, ACT_BY,       ACT_BW,       ACT_BH))       _state.playerSwappedProv = true;
+            if (_inRect(_actBtns[1].x, ACT_BY,       ACT_BW,       ACT_BH))       _state.playerSwappedProv = false;
+            if (_state.playerSwappedProv !== null &&
+                _inRect(_actBtns[2].x, BET_DECIDE_BY, BET_DECIDE_BW, BET_DECIDE_BH)) {
+              _state.playerSwapped = _state.playerSwappedProv;
+              _genSpeech2();
+            }
+          }
+        }
+        if (_state.roundTimer <= 0) {
+          if (_state.playerSwapped === null) {
+            _state.playerSwapped = (_state.playerSwappedProv !== null) ? _state.playerSwappedProv : false;
+            _genSpeech2();
+          }
+          _executeAISwaps(); _startBetPhase(); return;
+        }
+        if (_state.playerSwapped !== null && Input.mouse.clicked) {
+          if (_inRect(_actBtns[2].x, BET_DECIDE_BY, BET_DECIDE_BW, BET_DECIDE_BH)) {
+            _executeAISwaps(); _startBetPhase(); return;
+          }
+        }
+        return;
+      }
+
+      // ── bet フェーズ ──────────────────────────────────────────
+      if (_state.phase === 'bet') {
+        _state.roundTimer  -= dt;
+        _state.betElapsedT += dt;
+        // リアクションインターバル
+        _state.reactionLogIntervalT -= dt;
+        if (_state.reactionLogIntervalT <= 0) {
+          _state.reactionLogIntervalT = REACTION_INTERVAL;
+          _genAllReactions('interval');
+        }
+
+        if (_state.playerBet === null) {
+          if (Input.mouse.clicked) {
+            // BET/FOLD クリック → 仮選択
+            if (_inRect(BET_BX,  BET_BY_C, BET_BW, BET_BH))  _state.playerBetProv = true;
+            if (_inRect(FOLD_BX, BET_BY_C, BET_BW, BET_BH))  _state.playerBetProv = false;
+            // 決定ボタン（仮選択中のみ有効）
+            if (_state.playerBetProv !== null &&
+                _inRect(BET_DECIDE_BX + 160, BET_DECIDE_BY, BET_DECIDE_BW, BET_DECIDE_BH)) {
+              _state.playerBet = _state.playerBetProv;
+              _state.betDecisionShown = true;  // プレイヤー決定時に即時表示
+            }
+          }
+          if (_state.roundTimer <= 0) {
+            // 時間切れ: 仮選択があればそれを採用、なければフォールド
+            _state.playerBet = _state.playerBetProv !== null ? _state.playerBetProv : false;
+            _state.betDecisionShown = true;
+          }
+        }
+
+        if (_state.playerBet !== null) {
+          _preBetCalc();           // shotCount 先計算（hype表示用）ダメージはまだ与えない
+          _genAllReactions('bet_done');
+          // hype 感嘆符を設定
+          const EXCLAIMS = ['！', '…', 'ッ'];
+          for (let i = 0; i < AI_COUNT; i++) {
+            _state.hypeExclaim[i] = _ai[i].isAlive
+              ? EXCLAIMS[Math.floor(Math.random() * EXCLAIMS.length)] : '';
+          }
+          _state.phase         = 'show_decisions';
+          _state.subPhaseTimer = SHOW_DECISIONS_TIME;
+        }
+        return;
+      }
+
+      // ── show_decisions フェーズ（1.5秒）─────────────────────────
+      if (_state.phase === 'show_decisions') {
+        _state.subPhaseTimer -= dt;
+        if (_state.subPhaseTimer <= 0) {
+          _state.phase     = 'hype';
+          _state.hypeTimer = 0;
+          _state.hypeFlashAlpha = 0;
+        }
+        return;
+      }
+
+      // ── hype フェーズ（HYPE_DURATION秒）─────────────────────────
+      if (_state.phase === 'hype') {
+        _state.hypeTimer += dt;
+        // フラッシュ更新
+        if (_state.hypeTimer >= HYPE_FLASH_AT) {
+          const fT = _state.hypeTimer - HYPE_FLASH_AT;
+          _state.hypeFlashAlpha = fT < HYPE_FLASH_DUR
+            ? Math.max(0, 1 - fT / HYPE_FLASH_DUR) : 0;
+        }
+        if (_state.hypeTimer >= HYPE_DURATION) {
+          if (_state.playerBet === true) {
+            _state.phase       = 'card_reveal';  // ベット: カード開示へ
+            _state.revealTimer = 0;
+          } else {
+            _state.phase          = 'highlight_cards';  // フォールド: card_revealスキップ
+            _state.highlightTimer = 0;
+          }
+        }
+        return;
+      }
+
+      // ── card_reveal フェーズ（2秒）───────────────────────────────
+      if (_state.phase === 'card_reveal') {
+        _state.revealTimer += dt;
+        if (_state.revealTimer >= SHOT_FLASH_DURATION + REVEAL_SHOW_TIME) {
+          // BUILD 0012: show_result の前に highlight_cards フェーズへ
+          _state.phase          = 'highlight_cards';
+          _state.highlightTimer = 0;
+        }
+        return;
+      }
+
+      // ── highlight_cards フェーズ（HIGHLIGHT_CARDS_TIME秒）────────
+      if (_state.phase === 'highlight_cards') {
+        _state.highlightTimer += dt;
+        if (_state.highlightTimer >= HIGHLIGHT_CARDS_TIME) {
+          // imageState スナップショット → resolve → フリップ対象検出
+          for (let i = 0; i < AI_COUNT; i++) _prevAiImageStates[i] = _ai[i].imageState;
+          _findBetLosers();
+          _resolveRound();
+          _state.flipTargets.length = 0;
+          for (let i = 0; i < AI_COUNT; i++) {
+            // _applyDamage は imageState を変えないので HP から算出
+            _newAiImageStates[i] = _calcNewImageState(_ai[i].hp, _prevAiImageStates[i]);
+            if (_ai[i].isAlive && _ai[i].hp > 0 && _newAiImageStates[i] !== _prevAiImageStates[i]) {
+              _state.flipTargets.push(i);
+            }
+          }
+          // imageState / dispHp は judge 終了後に更新するためここでは変更しない
+          _state.phase      = 'judge';
+          _state.judgeTimer = 0;
+        }
+        return;
+      }
+
+      // ── judge フェーズ（JUDGE_TIME秒）────────────────────────────
+      if (_state.phase === 'judge') {
+        _state.judgeTimer += dt;
+        if (_state.judgeTimer >= JUDGE_TIME) {
+          // dispHp・imageState を新HPに同期
+          _human.dispHp = _human.hp;
+          for (let i = 0; i < AI_COUNT; i++) _ai[i].dispHp = _ai[i].hp;
+          if (_state.flipTargets.length > 0) {
+            _state.phase          = 'flip_drunk';
+            _state.flipTimer      = 0;
+            _state.flipMidApplied = false;
+          } else {
+            for (let i = 0; i < AI_COUNT; i++) _ai[i].imageState = _newAiImageStates[i];
+            _detectEliminations();
+            if (_state.bonusQueue.length > 0) {
+              _state.phase             = 'bonus_display';
+              _state.bonusDisplayTimer = BONUS_TEXT_DURATION + BONUS_IMG_DURATION;
+            } else if (_state.elimNames.length > 0) {
+              _state.phase         = 'show_result';
+              _state.subPhaseTimer = RESULT_DISPLAY_TIME;
+              _state.resolveFlashT = 0; _state.resolveFlashOn = true;
+              _state.elimTimer     = ELIMINATION_PAUSE;
+            } else {
+              _state.phase         = 'show_result';
+              _state.subPhaseTimer = RESULT_DISPLAY_TIME;
+              _state.resolveFlashT = 0; _state.resolveFlashOn = true;
+            }
+          }
+        }
+        return;
+      }
+
+      // ── flip_drunk フェーズ（NPC_FLIP_HALF_DUR×2 秒）────────────
+      if (_state.phase === 'flip_drunk') {
+        _state.flipTimer += dt;
+        // 中間点で新 imageState を適用（「パタン」の裏返り瞬間）
+        if (!_state.flipMidApplied && _state.flipTimer >= NPC_FLIP_HALF_DUR) {
+          _state.flipMidApplied = true;
+          for (let k = 0; k < _state.flipTargets.length; k++) {
+            _ai[_state.flipTargets[k]].imageState = _newAiImageStates[_state.flipTargets[k]];
+          }
+        }
+        if (_state.flipTimer >= NPC_FLIP_HALF_DUR * 2) {
+          _detectEliminations();
+          if (_state.bonusQueue.length > 0) {
+            _state.phase             = 'bonus_display';
+            _state.bonusDisplayTimer = BONUS_TEXT_DURATION + BONUS_IMG_DURATION;
+          } else if (_state.elimNames.length > 0) {
+            _state.phase         = 'show_result';
+            _state.subPhaseTimer = RESULT_DISPLAY_TIME;
+            _state.resolveFlashT = 0; _state.resolveFlashOn = true;
+            _state.elimTimer     = ELIMINATION_PAUSE;
+          } else {
+            _state.phase         = 'show_result';
+            _state.subPhaseTimer = RESULT_DISPLAY_TIME;
+            _state.resolveFlashT = 0; _state.resolveFlashOn = true;
+          }
+        }
+        return;
+      }
+
+
+      // ── show_result フェーズ（RESULT_DISPLAY_TIME秒）───────────────
+      if (_state.phase === 'show_result') {
+        _state.resolveFlashT += dt;
+        if (_state.resolveFlashT >= SHOT_FLASH_DURATION) {
+          _state.resolveFlashT -= SHOT_FLASH_DURATION;
+          _state.resolveFlashOn = !_state.resolveFlashOn;
+        }
+        if (_state.elimTimer > 0) {
+          _state.elimTimer -= dt;
+          if (_state.elimTimer <= 0) {
+            // 脱落演出終了 → bonus_display or show_result（resolveText表示）
+            if (_state.bonusQueue.length > 0) {
+              _state.phase             = 'bonus_display';
+              _state.bonusDisplayTimer = BONUS_TEXT_DURATION + BONUS_IMG_DURATION;
+            } else {
+              // elimTimer終了後は同じshow_resultで続行（resolveTextを表示）
+              _state.elimTimer     = 0;
+              _state.subPhaseTimer = RESULT_DISPLAY_TIME;
+            }
+          }
+          return;
+        }
+        _state.subPhaseTimer -= dt;
+        if (_state.subPhaseTimer <= 0) _advanceAfterShowResult();
+        return;
+      }
+
+      // ── bonus_display フェーズ（BUILD 0019/0020）─────────────────
+      if (_state.phase === 'bonus_display') {
+        _state.bonusDisplayTimer -= dt;
+        if (_state.bonusDisplayTimer <= 0) {
+          _state.bonusQueue.shift();
+          if (_state.bonusQueue.length > 0) {
+            // 次のエントリを表示
+            _state.bonusDisplayTimer = BONUS_TEXT_DURATION + BONUS_IMG_DURATION;
+          } else {
+            // BUILD 0021: キューが空になったら show_result へ
+            _state.phase         = 'show_result';
+            _state.subPhaseTimer = RESULT_DISPLAY_TIME;
+            _state.resolveFlashT = 0;
+            _state.resolveFlashOn = true;
+          }
+        }
+        return;
+      }
+
+      // ── fold_card_reveal フェーズ（BUILD 0021）──────────────────
+      if (_state.phase === 'fold_card_reveal') {
+        _state.revealTimer += dt;
+        if (_state.revealTimer >= FOLD_REVEAL_TIME) {
+          if (_countAlive() <= 1) {
+            _fillFinalHpList();
+            ResultScene.setup(_getWinnerName(), _human.isAlive, _finalHpList, AI_COUNT + 1);
+            SceneManager.change('Result');
+          } else {
+            _state.phase = 'next';
+          }
+        }
+        return;
+      }
+
+      // ── next フェーズ ─────────────────────────────────────────
+      if (_state.phase === 'next') {
+        _startNextRound();
+        return;
+      }
+    },
+
+    render() {
+      hbClear();
+      // BUILD 0013: 背景画像（なければフォールバック）
+      if (!_drawBgCover(0.10)) { ctx.fillStyle = '#0b0b18'; ctx.fillRect(0, 0, BASE_W, BASE_H); }
+
+      // AIスロット（5人）
+      for (let i = 0; i < AI_COUNT; i++) drawAISlot(i);
+
+      // テーブル
+      drawTable();
+
+      // プレイヤーエリア
+      drawPlayerArea();
+
+      // 交換フィード
+      drawExchangeDecisions();
+
+      // BUILD 0005: リアクションログパネル（常時表示）
+      drawReactionLogPanel();
+
+      // BUILD 0014: 全NPC吹き出し（スロット・UI より上、結果演出オーバーレイより下）
+      drawAllSpeechBubbles();
+
+      // BUILD 0005: フェーズ別オーバーレイ
+      drawShowDecisionsOverlay();
+      drawHypeOverlay();
+      drawCardRevealOverlay();
+      // BUILD 0012: 結果演出新フェーズ
+      drawHighlightCardsOverlay();
+      drawJudgeOverlay();
+      drawShowResultOverlay();
+
+      // BUILD 0013: つぎへスキップボタン
+      drawSkipButton();
+      // BUILD 0019: ボーナス画像オーバーレイ（最前面）
+      drawBonusDisplayOverlay();
+      // BUILD 0011: ゲームUIボタン（最前面）
+      drawGameUIButtons();
+      drawPauseOverlay();
+      drawConfirmDialog();
+
+      // ヒットボックス
+      hbDraw();
+    },
+
+    debugRender,
+  };
+})();
+
+// ================================================================
+// SCENE: RESULT  （勝者名 + 全員最終HP表示）
+// ================================================================
+const ResultScene = (() => {
+  const _state    = { outcome: 'GAME OVER', winnerName: '', isPlayerWin: false, survivorCount: 0 };
+  const _hpList   = [];
+  let   _hpListLen = 0;
+  for (let i = 0; i < PLAYER_COUNT; i++) _hpList.push({ name: '', hp: 0, isAlive: false });
+
+  let _blinkT = 0, _blinkV = true, _bgGrad = null;
+
+  return {
+    // ゲームロジックから呼ぶ
+    setup(winnerName, isPlayerWin, hpList, listLen) {
+      _state.winnerName   = winnerName;
+      _state.isPlayerWin  = isPlayerWin;
+      _state.outcome      = isPlayerWin ? 'YOU WIN!' : 'GAME OVER';
+      _hpListLen          = Math.min(listLen, _hpList.length);
+      let survivors = 0;
+      for (let i = 0; i < _hpListLen; i++) {
+        _hpList[i].name    = hpList[i].name;
+        _hpList[i].hp      = hpList[i].hp;
+        _hpList[i].isAlive = hpList[i].isAlive;
+        if (hpList[i].isAlive) survivors++;
+      }
+      _state.survivorCount = survivors;
+    },
+
+    onEnter() {
+      _blinkT = 0; _blinkV = true;
+      _bgGrad = ctx.createRadialGradient(BASE_W / 2, BASE_H * 0.35, 20, BASE_W / 2, BASE_H / 2, BASE_H);
+      _bgGrad.addColorStop(0, '#280000'); _bgGrad.addColorStop(1, '#050005');
+      registerButton('r_restart',
+        BASE_W / 2 - 120, BASE_H * 0.86, 240, 50,
+        'RESTART', () => SceneManager.change('Title'));
+    },
+
+    update(dt) {
+      _blinkT += dt;
+      if (_blinkT >= 0.5) { _blinkT = 0; _blinkV = !_blinkV; }
+      if (isHowToPlayOpen) return;  // BUILD 0018: モーダル中はゲーム操作を無効化
+      if (Input.isPressed('Space')) SceneManager.change('Title');
+      processClicks();
+    },
+
+    render() {
+      hbClear();
+      // BUILD 0013: 背景画像（なければグラデーション）
+      if (!_drawBgCover(0.60)) { ctx.fillStyle = _bgGrad; ctx.fillRect(0, 0, BASE_W, BASE_H); }
+
+      // アウトカムテキスト
+      ctx.save();
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.shadowColor = _state.outcome === 'YOU WIN!' ? '#0088ff' : '#cc0000';
+      ctx.shadowBlur  = 44;
+      ctx.fillStyle   = _state.outcome === 'YOU WIN!' ? '#44aaff' : '#ff4444';
+      ctx.font        = 'bold 90px serif';
+      ctx.fillText(_state.outcome, BASE_W / 2, BASE_H * 0.22);
+      ctx.shadowBlur = 0; ctx.restore();
+
+      // 勝者名
+      ctx.fillStyle = '#ffee66'; ctx.font = 'bold 32px serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      if (_state.isPlayerWin) {
+        ctx.fillText('Winner: ' + _state.winnerName, BASE_W / 2, BASE_H * 0.38);
+      } else if (_state.survivorCount === 1) {
+        ctx.fillText('Winner: ' + _state.winnerName, BASE_W / 2, BASE_H * 0.38);
+      } else {
+        ctx.fillStyle = '#cc7755'; ctx.font = 'bold 28px serif';
+        ctx.fillText('あなたは脱落しました…', BASE_W / 2, BASE_H * 0.38);
+      }
+
+      // 最終HP一覧
+      ctx.fillStyle = '#aaaaaa'; ctx.font = 'bold 16px monospace';
+      ctx.fillText('─── 最終結果 ───', BASE_W / 2, BASE_H * 0.46);
+
+      const listStartY = BASE_H * 0.51;
+      const listSpacY  = 28;
+      for (let i = 0; i < _hpListLen; i++) {
+        const e = _hpList[i];
+        ctx.fillStyle = e.isAlive ? '#88ff88' : '#886666';
+        ctx.font      = '18px monospace';
+        const drunk   = INITIAL_HP - e.hp;
+        const bar     = '■'.repeat(Math.max(0, drunk)) + '□'.repeat(Math.max(0, e.hp));
+        ctx.fillText(`${e.name}: 酔い ${drunk}杯  ${bar}`, BASE_W / 2, listStartY + i * listSpacY);
+      }
+
+      // 点滅テキスト
+      if (_blinkV) {
+        ctx.fillStyle = '#cccccc'; ctx.font = 'bold 22px monospace';
+        ctx.fillText('PRESS SPACE TO RESTART', BASE_W / 2, BASE_H * 0.84);
+      }
+
+      drawButton('r_restart');
+      hbAdd(BASE_W / 2 - 120, BASE_H * 0.86, 240, 50, 'RestartBtn');
+      hbDraw();
+    },
+  };
+})();
+
+// ================================================================
+// BUILD 0018: 「遊び方」ボタン＋モーダル（全シーン共通）
+// ================================================================
+const HTB_X = 910, HTB_Y = 16, HTB_W = 110, HTB_H = 36;
+const HTP_W = 760, HTP_H = 520;
+const HTP_X = (BASE_W - HTP_W) / 2;
+const HTP_Y = (BASE_H - HTP_H) / 2;
+const HTP_CLOSE_W = 100, HTP_CLOSE_H = 32;
+const HTP_CLOSE_X = HTP_X + HTP_W - HTP_CLOSE_W - 12;
+const HTP_CLOSE_Y = HTP_Y + 12;
+// ページナビゲーション
+const HTP_PAGES   = 2;
+const HTP_NAV_W   = 80, HTP_NAV_H = 32;
+const HTP_NAV_Y   = HTP_Y + HTP_H - 48;
+const HTP_PREV_X  = HTP_X + 24;
+const HTP_NEXT_X  = HTP_X + HTP_W - 24 - HTP_NAV_W;
+let _htpPage = 0;
+
+function drawHowToPlayButton() {
+  ctx.save();
+  ctx.font = 'bold 15px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const hov = Input.mouse.x >= HTB_X && Input.mouse.x <= HTB_X + HTB_W &&
+              Input.mouse.y >= HTB_Y && Input.mouse.y <= HTB_Y + HTB_H;
+  _globalRRect(HTB_X, HTB_Y, HTB_W, HTB_H, 6);
+  ctx.fillStyle = hov ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.58)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = hov ? '#000' : '#fff';
+  ctx.fillText('？ 遊び方', HTB_X + HTB_W / 2, HTB_Y + HTB_H / 2);
+  ctx.restore();
+}
+
+// 遊び方テキスト — 2ページ分
+const HTP_LINES = [
+  // ── ページ 1 ──────────────────────────────────────────────────────
+  [
+    { text: '【目的】',                                                              gold: true  },
+    { text: '  最後まで生き残った1人が勝者！',                                       gold: false },
+    { text: '  酔いメーターが MAX になったら脱落です。',                              gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '【ラウンドの流れ】',                                                    gold: true  },
+    { text: '',                                                                      gold: false },
+    { text: '  ① カード配布',                                                       gold: false },
+    { text: '     全員にトランプ1枚が配られます。',                                  gold: false },
+    { text: '     自分のカードは見えません。他全員のカードは見えます。',              gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '  ② カード交換（任意）',                                               gold: false },
+    { text: '     山札から1枚引いて手札と交換できます。',                            gold: false },
+    { text: '     交換後も自分のカードは見えません。',                                gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '  ③ ベット or フォールド',                                             gold: false },
+    { text: '     ベット     → テーブルにショットを積む',                           gold: false },
+    { text: '                  勝てば無傷！負ければ全ショットを飲む',               gold: false },
+    { text: '     フォールド → 自分で1杯だけ飲む（確定ダメージ）',                  gold: false },
+    { text: '                  4回目以降はペナルティが累増！',                       gold: false },
+    { text: '     時間切れは自動でフォールド扱いになります。',                        gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '  ④ 勝敗判定',                                                         gold: false },
+    { text: '     ベット参加者のカードを比較。最も数字が低い人が',                   gold: false },
+    { text: '     テーブルのショット全部を飲みます。（同点は全員）',                  gold: false },
+    { text: '     1人しかベットしなかった場合は引き分け→次回に持ち越し！',           gold: false },
+  ],
+  // ── ページ 2 ──────────────────────────────────────────────────────
+  [
+    { text: '【特殊ルール】',                                                        gold: true  },
+    { text: '',                                                                      gold: false },
+    { text: '  ■ A-2ルール',                                                        gold: false },
+    { text: '     AとBが同時にベットしているとき、',                                 gold: false },
+    { text: '     「2」が最強カードになります。',                                    gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '  ■ 親（ディーラー）システム',                                         gold: false },
+    { text: '     毎ラウンド1人が「親」になります（時計回りで交代）。',              gold: false },
+    { text: '     親のハンデ：',                                                     gold: false },
+    { text: '       ・ベットに参加 → テーブルのショットに+1加算',                   gold: false },
+    { text: '         （勝っても負けても+1分が反映される）',                         gold: false },
+    { text: '       ・フォールド → 通常より1杯多く飲む（計2杯）',                  gold: false },
+    { text: '     親の特権：自分のカードが場の平均より高いか低いかが分かる！',        gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '【キャラクターのシグナルを読め！】',                                    gold: true  },
+    { text: '',                                                                      gold: false },
+    { text: '     キャラクターはセリフや行動でヒントを出しています。',                gold: false },
+    { text: '     ただし、嘘をつくキャラもいるので油断は禁物！',                     gold: false },
+    { text: '     酔うほど判断力が下がり行動が変わることも…',                        gold: false },
+    { text: '',                                                                      gold: false },
+    { text: '【キー操作】',                                                          gold: true  },
+    { text: '     Space … ゲーム開始 / リスタート',                                 gold: false },
+    { text: '     Esc   … ポーズ切り替え（ゲーム中）',                              gold: false },
+    { text: '     ← →  … 遊び方のページ切り替え',                                  gold: false },
+  ],
+];
+
+function drawHowToPlayModal() {
+  if (!isHowToPlayOpen) return;
+  ctx.save();
+
+  // 背景オーバーレイ
+  ctx.fillStyle = 'rgba(0,0,0,0.75)';
+  ctx.fillRect(0, 0, BASE_W, BASE_H);
+
+  // パネル
+  _globalRRect(HTP_X, HTP_Y, HTP_W, HTP_H, 12);
+  ctx.fillStyle = 'rgba(20,10,5,0.97)'; ctx.fill();
+  ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 2; ctx.stroke();
+
+  // タイトル行
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.fillStyle = '#d4a843'; ctx.font = 'bold 20px sans-serif';
+  ctx.fillText('ポーカー × ショット！— 遊び方', BASE_W / 2, HTP_Y + 14);
+
+  // 区切り線（上）
+  ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(HTP_X + 24, HTP_Y + 50);
+  ctx.lineTo(HTP_X + HTP_W - 24, HTP_Y + 50);
+  ctx.stroke();
+
+  // ✕ 閉じるボタン
+  const hovC = Input.mouse.x >= HTP_CLOSE_X && Input.mouse.x <= HTP_CLOSE_X + HTP_CLOSE_W &&
+               Input.mouse.y >= HTP_CLOSE_Y  && Input.mouse.y <= HTP_CLOSE_Y  + HTP_CLOSE_H;
+  _globalRRect(HTP_CLOSE_X, HTP_CLOSE_Y, HTP_CLOSE_W, HTP_CLOSE_H, 6);
+  ctx.fillStyle = hovC ? 'rgba(255,255,255,0.92)' : 'rgba(80,20,20,0.80)'; ctx.fill();
+  ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = hovC ? '#000' : '#fff'; ctx.font = 'bold 14px sans-serif';
+  ctx.fillText('✕ 閉じる', HTP_CLOSE_X + HTP_CLOSE_W / 2, HTP_CLOSE_Y + HTP_CLOSE_H / 2);
+
+  // 本文テキスト（現在ページ）
+  const lines  = HTP_LINES[_htpPage];
+  const startX = HTP_X + 28;
+  const startY = HTP_Y + 62;
+  const lineH  = 16;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  for (let i = 0; i < lines.length; i++) {
+    const entry = lines[i];
+    ctx.fillStyle = entry.gold ? '#d4a843' : '#f0f0e8';
+    ctx.font = entry.gold ? 'bold 13px sans-serif' : '13px sans-serif';
+    ctx.fillText(entry.text, startX, startY + i * lineH);
+  }
+
+  // 区切り線（下）
+  ctx.strokeStyle = '#b8860b'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(HTP_X + 24, HTP_NAV_Y - 10);
+  ctx.lineTo(HTP_X + HTP_W - 24, HTP_NAV_Y - 10);
+  ctx.stroke();
+
+  // ◀ 前ページボタン
+  const canPrev = _htpPage > 0;
+  const hovP = canPrev && Input.mouse.x >= HTP_PREV_X && Input.mouse.x <= HTP_PREV_X + HTP_NAV_W &&
+               Input.mouse.y >= HTP_NAV_Y && Input.mouse.y <= HTP_NAV_Y + HTP_NAV_H;
+  _globalRRect(HTP_PREV_X, HTP_NAV_Y, HTP_NAV_W, HTP_NAV_H, 6);
+  ctx.fillStyle = !canPrev ? 'rgba(40,40,40,0.5)' : hovP ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.58)';
+  ctx.fill();
+  ctx.strokeStyle = canPrev ? '#b8860b' : 'rgba(100,100,100,0.4)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = !canPrev ? '#555' : hovP ? '#000' : '#fff';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('◀ 前へ', HTP_PREV_X + HTP_NAV_W / 2, HTP_NAV_Y + HTP_NAV_H / 2);
+
+  // ページ番号
+  ctx.fillStyle = '#aaa'; ctx.font = '14px sans-serif';
+  ctx.fillText(`${_htpPage + 1} / ${HTP_PAGES}`, BASE_W / 2, HTP_NAV_Y + HTP_NAV_H / 2);
+
+  // ▶ 次ページボタン
+  const canNext = _htpPage < HTP_PAGES - 1;
+  const hovN = canNext && Input.mouse.x >= HTP_NEXT_X && Input.mouse.x <= HTP_NEXT_X + HTP_NAV_W &&
+               Input.mouse.y >= HTP_NAV_Y && Input.mouse.y <= HTP_NAV_Y + HTP_NAV_H;
+  _globalRRect(HTP_NEXT_X, HTP_NAV_Y, HTP_NAV_W, HTP_NAV_H, 6);
+  ctx.fillStyle = !canNext ? 'rgba(40,40,40,0.5)' : hovN ? 'rgba(255,255,255,0.92)' : 'rgba(0,0,0,0.58)';
+  ctx.fill();
+  ctx.strokeStyle = canNext ? '#b8860b' : 'rgba(100,100,100,0.4)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = !canNext ? '#555' : hovN ? '#000' : '#fff';
+  ctx.font = 'bold 15px sans-serif';
+  ctx.fillText('次へ ▶', HTP_NEXT_X + HTP_NAV_W / 2, HTP_NAV_Y + HTP_NAV_H / 2);
+
+  ctx.restore();
+}
+
+// ================================================================
+// DEBUG オーバーレイ
+// ================================================================
+let _fps = 0, _fpsAccum = 0, _fpsCnt = 0;
+
+function renderDebugOverlay(dt) {
+  if (!Debug.overlay) return;
+
+  // 基本情報
+  ctx.fillStyle = 'rgba(0,0,0,0.70)'; ctx.fillRect(8, 8, 264, 122);
+  ctx.fillStyle = '#00ff88'; ctx.font = '14px monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  ctx.fillText(`FPS   : ${_fps.toFixed(1)}`,              16,  16);
+  ctx.fillText(`Scene : ${SceneManager.getName()}`,        16,  34);
+  ctx.fillText(`dt    : ${(dt * 1000).toFixed(2)} ms`,    16,  52);
+  ctx.fillText(`Slow  : ${Debug.slow    ? 'ON ×0.3' : 'off'}`, 16,  70);
+  ctx.fillText(`Hitbox: ${Debug.hitbox  ? 'ON' : 'off'}`, 16,  88);
+  ctx.fillText(`Labels: ${Debug.labels  ? 'ON' : 'off'}`, 16, 106);
+
+  // Gameシーン専用デバッグ
+  if (_sceneName === 'Game') GameScene.debugRender();
+}
+
+function renderBuildLabel() {
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '13px monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+  ctx.fillText(BUILD_LABEL, BASE_W - 8, BASE_H - 6);
+}
+
+function renderCursorLabel() {
+  if (!Debug.labels) return;
+  ctx.fillStyle = 'rgba(255,255,0,0.9)'; ctx.font = '11px monospace';
+  ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillText(`(${Math.floor(Input.mouse.x)}, ${Math.floor(Input.mouse.y)})`, 8, BASE_H - 8);
+}
+
+// ================================================================
+// MAIN LOOP
+// 更新順序: InputEdge → GameState → AI → Render → InputEdge-End
+// ================================================================
+SceneManager.register('Title',  TitleScene);
+SceneManager.register('Game',   GameScene);
+SceneManager.register('Result', ResultScene);
+
+// Loading 表示（プリロード中）
+ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+ctx.fillStyle = '#ffffff'; ctx.font = 'bold 36px monospace';
+ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+ctx.fillText('Loading...', BASE_W / 2, BASE_H / 2);
+
+let _lastTime = performance.now();
+
+function frame(now) {
+  try {
+    // ── 1. dt ────────────────────────────────────────────────────
+    let dt = (now - _lastTime) / 1000;
+    _lastTime = now;
+    dt = Math.min(0.033, Math.max(0.001, dt));
+    if (Debug.slow) dt *= 0.3;
+
+    // ── 2. FPS ───────────────────────────────────────────────────
+    _fpsAccum += dt; _fpsCnt++;
+    if (_fpsAccum >= 1.0) { _fps = _fpsCnt / _fpsAccum; _fpsAccum = 0; _fpsCnt = 0; }
+
+    // ── 3. InputEdge: デバッグキー ───────────────────────────────
+    if (Input.isPressed('F2')) Debug.overlay    = !Debug.overlay;
+    if (Input.isPressed('F3')) Debug.hitbox     = !Debug.hitbox;
+    if (Input.isPressed('F4')) { Debug.seedLock   = !Debug.seedLock;   console.log('[DBG] SeedLock:',   Debug.seedLock); }
+    if (Input.isPressed('F5')) Debug.slow       = !Debug.slow;
+    if (Input.isPressed('F6')) { Debug.screenshot = !Debug.screenshot; console.log('[DBG] Screenshot:', Debug.screenshot); }
+    if (Input.isPressed('F7')) Debug.labels     = !Debug.labels;
+    if (Input.isPressed('F8')) { Debug.aiDebug   = !Debug.aiDebug;    console.log('[DBG] AIDebug:',    Debug.aiDebug); }
+    if (Input.isPressed('F9')) GameScene.dbgDealJoker();  // [DBG] プレイヤーにジョーカー配布
+
+    // ── BUILD 0018: 遊び方モーダル入力処理（全シーン共通）──────────
+    // Esc でモーダルを閉じる
+    if (Input.isPressed('Escape') && isHowToPlayOpen) {
+      isHowToPlayOpen = false;
+    }
+    // 「？遊び方」ボタン / モーダル内ボタンのクリック判定
+    if (Input.mouse.clicked) {
+      const mx = Input.mouse.x, my = Input.mouse.y;
+      if (!isHowToPlayOpen &&
+          mx >= HTB_X && mx <= HTB_X + HTB_W &&
+          my >= HTB_Y && my <= HTB_Y + HTB_H) {
+        isHowToPlayOpen = true;
+        _htpPage = 0;
+      } else if (isHowToPlayOpen) {
+        // ✕ 閉じる
+        if (mx >= HTP_CLOSE_X && mx <= HTP_CLOSE_X + HTP_CLOSE_W &&
+            my >= HTP_CLOSE_Y  && my <= HTP_CLOSE_Y  + HTP_CLOSE_H) {
+          isHowToPlayOpen = false;
+        }
+        // ◀ 前ページ
+        else if (_htpPage > 0 &&
+            mx >= HTP_PREV_X && mx <= HTP_PREV_X + HTP_NAV_W &&
+            my >= HTP_NAV_Y  && my <= HTP_NAV_Y  + HTP_NAV_H) {
+          _htpPage--;
+        }
+        // ▶ 次ページ
+        else if (_htpPage < HTP_PAGES - 1 &&
+            mx >= HTP_NEXT_X && mx <= HTP_NEXT_X + HTP_NAV_W &&
+            my >= HTP_NAV_Y  && my <= HTP_NAV_Y  + HTP_NAV_H) {
+          _htpPage++;
+        }
+      }
+    }
+    // 矢印キーでページ切り替え（モーダル中のみ）
+    if (isHowToPlayOpen) {
+      if (Input.isPressed('ArrowLeft')  && _htpPage > 0)              _htpPage--;
+      if (Input.isPressed('ArrowRight') && _htpPage < HTP_PAGES - 1) _htpPage++;
+    }
+
+    // ── 4. GameState / AI 更新 ───────────────────────────────────
+    SceneManager.update(dt);
+
+    // ── 5. レンダリング ──────────────────────────────────────────
+    // 描画順: シーン → 遊び方モーダル → デバッグ → ビルドラベル → 遊び方ボタン
+    SceneManager.render();
+    drawHowToPlayModal();
+    renderDebugOverlay(dt);
+    renderBuildLabel();
+    renderCursorLabel();
+    drawHowToPlayButton();
+
+    // ── 6. InputEdge 終了 ────────────────────────────────────────
+    Input.endFrame();
+
+  } catch (err) {
+    ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, BASE_W, BASE_H);
+    ctx.fillStyle = '#ff4444'; ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+    ctx.fillText('RUNTIME ERROR', 12, 12);
+    ctx.fillStyle = '#ff8888'; ctx.font = '13px monospace';
+    ctx.fillText(String(err.message), 12, 38);
+    const stk = (err.stack || '').split('\n');
+    for (let i = 0; i < Math.min(stk.length, 16); i++) ctx.fillText(stk[i], 12, 60 + i * 16);
+    console.error('[GAME ERROR]', err);
+    try { Input.endFrame(); } catch (_e) {}
+  }
+  requestAnimationFrame(frame);
+}
+
+// 画像プリロード完了後にゲームを開始
+preloadNpcImages(() => {
+  _lastTime = performance.now();
+  SceneManager.change('Title');
+  requestAnimationFrame(frame);
+});
+</script>
+</body>
+</html>
